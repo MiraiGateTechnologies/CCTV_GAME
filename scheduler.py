@@ -14,6 +14,7 @@ import argparse
 import shutil
 import threading
 from ultralytics import YOLO
+import math
 
 # ── Import Refactored Modules ───────────────────────────────────────
 from core.counting import VehicleCounter
