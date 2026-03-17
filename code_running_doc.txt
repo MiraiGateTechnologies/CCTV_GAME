@@ -1,0 +1,123 @@
+Final File Structure
+File	Sirf Yahi Kaam
+download.py	Download/URL logic — get_stream_url(), extract_clip(), download() CLI, list_videos()
+main.py	Counting core — VehicleCounter, CONFIG, VEHICLE_CLASSES + entry point
+stream_manager.py	Background manager — ClipManager (bg download + validation threads)
+web_server.py	Flask web server — MJPEG streaming only
+scheduler.py	IST scheduler — time slots, globe animation, orchestration
+yolo11.py	Speed tracking experiment (standalone, untouched)
+Kya kiya:
+
+Teen main entry points hain project mein. Here's everything:
+
+Run Commands
+1. download.py — Pehle video download karo
+
+# YouTube se clip download karo
+python download.py --url "https://youtube.com/live/..." --name video1
+
+# Duration limit ke saath (300s = 5 min)
+python download.py --url "https://youtube.com/live/..." --name video1 --duration 300
+
+# Downloaded videos list dekho
+python download.py --list
+2. main.py — Single stream/video pe vehicle counting
+
+# Local video (videos/ folder se)
+python main.py --video video1
+
+# YouTube live stream
+python main.py --url "https://youtube.com/live/..."
+
+# Custom settings
+python main.py --video video1 --model yolo11x.pt --conf 0.35 --imgsz 1280
+
+# Web browser se dekho (no OpenCV window)
+python main.py --video video1 --no-gui --web-port 5000
+# Then open: http://localhost:5000
+3. scheduler.py — Multiple streams, IST time slots ke hisaab se cycle
+
+# Default config ke saath
+python scheduler.py
+
+# Custom config
+python scheduler.py --config streams_config.json
+
+# Test mode (bina live stream ke check karo ki sab imports/config sahi hai)
+python scheduler.py --test
+
+# Web browser se dekho
+python scheduler.py --no-gui --web-port 5000
+Quick Reference Table
+Main Goal	Command
+Video download karna	python download.py --url "..." --name video1
+Local video count karna	python main.py --video video1
+Live YouTube count karna	python main.py --url "https://..."
+Multiple streams schedule karna	python scheduler.py
+Config/imports test karna	python scheduler.py --test
+Browser pe dekho (no window)	python main.py --video video1 --no-gui → http://localhost:5000
+
+------------------------------------------------------------
+
+Simple dependency diagram:
+
+
+download.py      ──── STANDALONE  (stdlib only)
+web_server.py    ──── STANDALONE  (flask + cv2 only)
+stream_manager.py ─── STANDALONE  (ultralytics + cv2 only)
+yolo11.py        ──── STANDALONE  (experimental, hardcoded paths)
+
+main.py          ──── depends on:
+                        ├── download.py     (get_stream_url)
+                        └── web_server.py   (update_frame, start_server)
+
+scheduler.py     ──── depends on:
+                        ├── main.py         (VehicleCounter, CONFIG, VEHICLE_CLASSES)
+                        ├── download.py     (get_stream_url, extract_clip)
+                        ├── web_server.py   (update_frame, start_server)
+                        └── stream_manager.py (ClipManager)
+Summary:
+
+File	Type	Depends On
+download.py	Standalone	Nothing
+web_server.py	Standalone	Nothing
+stream_manager.py	Standalone	Nothing
+yolo11.py	Standalone	Nothing
+main.py	Dependent	download + web_server
+scheduler.py	Dependent	main + download + web_server + stream_manager
+Practical matlab:
+
+download.py, web_server.py, stream_manager.py — inhe independently edit kar sakte ho, kisi aur file pe koi asar nahi padega
+main.py — isko edit karte waqt download.py aur web_server.py ko dhyan rakhna
+scheduler.py — sabse zyada dependent hai, ye poore project ka orchestrator hai
+
+
+-------------------------------------------------------------------
+
+Depends on what you want to do:
+
+Pura automated project (multiple streams, IST time slots, globe animation, background validation):
+
+
+python scheduler.py
+Ye sab kuch automatically handle karta hai.
+
+Sirf ek video/stream manually test karna (simple, quick):
+
+
+python main.py --video video1
+Flow visually:
+
+
+scheduler.py          ← FULL AUTOMATED (production use)
+    ↓ uses
+    ├── stream_manager.py  (background download + validate clips)
+    ├── main.py            (VehicleCounter class)
+    ├── download.py        (URL resolve + clip download)
+    └── web_server.py      (browser streaming)
+
+main.py               ← MANUAL / TESTING (single stream)
+    ↓ uses
+    ├── download.py        (URL resolve)
+    └── web_server.py      (browser streaming)
+Short answer: Haan, production mein scheduler.py hi run karo. main.py sirf tab use karo jab koi specific video test karni ho ya naya feature try karna ho.

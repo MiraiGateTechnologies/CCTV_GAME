@@ -1,0 +1,7 @@
+tracker_type: bytetrack
+track_high_thresh: 0.35   # was 0.20 — low-conf jittery detections ko primary se bahar rakho
+track_low_thresh: 0.15    # was 0.05 — extremely noisy detections ignore karo
+new_track_thresh: 0.35
+track_buffer: 90
+match_thresh: 0.78
+fuse_score: true
