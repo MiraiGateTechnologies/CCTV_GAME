@@ -52,7 +52,7 @@ def get_stream_url(youtube_url: str) -> str:
     """Resolve a YouTube URL to a direct playable stream URL via yt-dlp."""
     print("[INFO] YouTube stream URL fetch kar raha hoon...")
     try:
-        cmd = ["yt-dlp", "--get-url", "-f", "best[ext=mp4]/best", "--no-playlist", youtube_url]
+        cmd = [sys.executable, "-m", "yt_dlp", "--get-url", "-f", "best[ext=mp4]/best", "--no-playlist", youtube_url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         url = result.stdout.strip().split('\n')[0]
         if url:

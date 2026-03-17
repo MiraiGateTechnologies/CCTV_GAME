@@ -43,6 +43,7 @@
 
 import os
 import cv2
+import sys
 import time
 import queue
 import threading
@@ -94,7 +95,7 @@ class ClipManager:
         """Uses yt-dlp to download a 35s chunk."""
         print(f"[DOWNLOADER] Fetching new clip for {self.stream_name}...")
         cmd = [
-            "yt-dlp",
+            sys.executable, "-m", "yt_dlp",
             "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--external-downloader", "ffmpeg",
             "--external-downloader-args", f"ffmpeg:-ss 0 -t {CLIP_DURATION}",
