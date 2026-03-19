@@ -121,6 +121,10 @@ def run_counting_on_clip(clip_path, model, stream_name, count_duration, config_f
     display_fps = 0
     last_results = None
     user_quit = False
+    
+    bad_quality_count = 0
+    last_blur_val = 100.0
+    last_bright_val = 100.0
 
     VEHICLE_CLASSES = {2: "Car", 5: "Bus", 7: "Truck"}
     
@@ -129,6 +133,35 @@ def run_counting_on_clip(clip_path, model, stream_name, count_duration, config_f
         if not ret: break
         
         frame_count += 1
+        
+        # --- Stream Quality Check ---
+        if frame_count % 90 == 1:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            last_blur_val = cv2.Laplacian(gray, cv2.CV_64F).var()
+            last_bright_val = cv2.mean(gray)[0]
+            
+            if last_blur_val < 15 or last_bright_val < 10 or last_bright_val > 250:
+                bad_quality_count += 1
+            else:
+                bad_quality_count = 0
+                
+            if bad_quality_count >= 2:
+                print(f"[{ist_now_str()}] WARNING: Stream {stream_name} rejected. Quality blocked/unclear (Blur={last_blur_val:.1f}, Bright={last_bright_val:.1f})")
+                if gui_enabled:
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0,0), (frame.shape[1], frame.shape[0]), (0,0,200), -1)
+                    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+                    cv2.putText(frame, "STREAM REJECTED : CAMERA BLOCKED", (max(10, frame.shape[1]//2 - 350), frame.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+                    for _ in range(30):
+                        web_server.update_frame(frame)
+                        cv2.imshow(WINDOW_NAME, frame)
+                        if cv2.waitKey(33) == ord('q'):
+                            user_quit = True
+                            break
+                            
+                cap.release()
+                return {"total": 0, "class_counts": {}, "error": True, "reason": "Camera Blocked or Blur"}
+
         if frame_count % 30 == 0:
             elapsed = time.time() - fps_timer
             display_fps = 30 / elapsed if elapsed > 0 else 0
@@ -162,14 +195,17 @@ def run_counting_on_clip(clip_path, model, stream_name, count_duration, config_f
         # Scheduler specific dashboard 
         h, w = frame.shape[:2]
         overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (350, 250), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (10, 10), (350, 275), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
         y = 30
         cv2.putText(frame, f"STREAM: {stream_name}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
         y += 28
         cv2.putText(frame, f"IST: {ist_now_str()}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 200, 255), 1)
-        y += 28
+        y += 22
+        q_color = (0, 200, 0) if bad_quality_count == 0 else (0, 0, 255)
+        cv2.putText(frame, f"QUALITY: Blur {last_blur_val:.0f} | Bright {last_bright_val:.0f}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, q_color, 1)
+        y += 24
         cv2.putText(frame, f"COUNT: {counter.interval_total}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
         y += 28
         for cls_name, cnt in counter.interval_class_counts.items():
@@ -344,7 +380,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG)
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--imgsz", type=int, default=1600)
     parser.add_argument("--skip-frames", type=int, default=1)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--no-gui", action="store_true")

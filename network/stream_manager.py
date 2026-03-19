@@ -215,7 +215,8 @@ class ClipManager:
                 # Wait for a newly downloaded clip
                 raw_clip_path = self.download_queue.get(timeout=2)
                 
-                is_valid = self._validate_clip(raw_clip_path)
+                # is_valid = self._validate_clip(raw_clip_path)
+                is_valid = True
                 
                 if is_valid:
                     print(f"[VALIDATOR] Clip APPROVED! Moving to ReadyQueue.")

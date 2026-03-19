@@ -53,6 +53,9 @@ class VehicleCounter:
         self.recent_crossings = []
         self.SPATIAL_COOLDOWN_PX   = 20
         self.SPATIAL_COOLDOWN_SECS = 0.5
+        
+        # ── ROI Deduplication State ──
+        self.roi_track_boxes = {}  # track_id -> (x1, y1, x2, y2, timestamp)
 
         # ── Tracking state ──
         self.track_history = defaultdict(list)
@@ -107,6 +110,34 @@ class VehicleCounter:
         self.recent_crossings.append((cx, cy, now))
         return False
 
+    def _is_duplicate_footprint(self, new_x1, new_y1, new_x2, new_y2, max_time_gap=2.5):
+        """Return the duplicate track_id if a new detection heavily overlaps with a recently tracked object."""
+        now = time.time()
+        self.roi_track_boxes = {
+            cid: (px1, py1, px2, py2, t) 
+            for cid, (px1, py1, px2, py2, t) in self.roi_track_boxes.items()
+            if now - t < max_time_gap
+        }
+        
+        ncx, ncy = (new_x1 + new_x2) / 2, (new_y1 + new_y2) / 2
+        for cid, (px1, py1, px2, py2, t) in self.roi_track_boxes.items():
+            ix1, iy1 = max(new_x1, px1), max(new_y1, py1)
+            ix2, iy2 = min(new_x2, px2), min(new_y2, py2)
+            if ix2 > ix1 and iy2 > iy1:
+                inter = (ix2 - ix1) * (iy2 - iy1)
+                area1 = (new_x2 - new_x1) * (new_y2 - new_y1)
+                area2 = (px2 - px1) * (py2 - py1)
+                iou = inter / (area1 + area2 - inter)
+                if iou > 0.25:
+                    return cid
+                    
+            pcx, pcy = (px1 + px2) / 2, (py1 + py2) / 2
+            dist = math.hypot(ncx - pcx, ncy - pcy)
+            if dist < max(new_x2 - new_x1, new_y2 - new_y1) * 0.6:
+                return cid
+                
+        return None
+
     def _clear_interval(self):
         """Called at start of each new COUNT phase."""
         self.interval_total = 0
@@ -114,6 +145,7 @@ class VehicleCounter:
         self.interval_counted_ids.clear()
         self.inside_roi_ids.clear()
         self.recent_crossings.clear()
+        self.roi_track_boxes.clear()
 
     def update_phase(self):
         """Update COUNT / WAIT cycle. Returns True if counting active."""
@@ -154,7 +186,7 @@ class VehicleCounter:
                 continue
 
             x1, y1, x2, y2 = box.astype(int)
-            cx, cy = (x1+x2)//2, y2
+            cx, cy = (x1+x2)//2, (y1+y2)//2
 
             _EMA_ALPHA = 0.80
             if track_id in self.prev_centers:
@@ -193,22 +225,36 @@ class VehicleCounter:
             # ROI Mode
             elif self.mode == "roi" and self.roi_poly:
                 inside = point_in_polygon((cx, cy), self.roi_poly)
+                
+                # Check for ID switches for any new track_id
+                if track_id not in self.inside_roi_ids and track_id not in self.interval_counted_ids:
+                    dup_id = self._is_duplicate_footprint(x1, y1, x2, y2)
+                    if dup_id is not None:
+                        if dup_id in self.interval_counted_ids:
+                            self.interval_counted_ids.add(track_id)
+                        if dup_id in self.inside_roi_ids:
+                            self.inside_roi_ids.add(track_id)
+
                 if inside:
                     seen_in_roi_this_frame.add(track_id)
-                    if (track_id not in self.inside_roi_ids
-                            and track_id not in self.interval_counted_ids
-                            and counting_active
-                            and not self._is_duplicate_crossing(cx, cy)):
-                        self.interval_total += 1
-                        self.interval_class_counts[vehicle_classes_dict[cls]] += 1
-                        self.interval_counted_ids.add(track_id)
-                        self.flash_timers[track_id] = self.flash_frames
-                        box_half_flash = max(x2-x1, y2-y1) // 2 + 6
-                        self.flash_positions[track_id] = (cx, cy, box_half_flash)
                     self.inside_roi_ids.add(track_id)
+                else:
+                    # NOT inside ROI (Exit Condition)
+                    if track_id in self.inside_roi_ids and track_id not in self.interval_counted_ids:
+                        if counting_active and not self._is_duplicate_crossing(cx, cy):
+                            self.interval_total += 1
+                            self.interval_class_counts[vehicle_classes_dict[cls]] += 1
+                            self.interval_counted_ids.add(track_id)
+                            self.flash_timers[track_id] = self.flash_frames
+                            box_half_flash = max(x2-x1, y2-y1) // 2 + 6
+                            self.flash_positions[track_id] = (cx, cy, box_half_flash)
 
             self.prev_centers[track_id] = (cx, cy)
             
+            # Update spatial footprint registry for all tracked/counted vehicles continuously
+            if track_id in self.inside_roi_ids or track_id in self.interval_counted_ids:
+                self.roi_track_boxes[track_id] = (x1, y1, x2, y2, time.time())
+                
             if track_id not in self.interval_counted_ids:
                 dots_to_draw.add((cx, cy))
 
