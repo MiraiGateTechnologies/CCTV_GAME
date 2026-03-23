@@ -35,7 +35,7 @@ import web_server
 #  CONFIGURATION
 # ─────────────────────────────────────────────
 CONFIG = {
-    "model":             "yolov8l.pt",
+    "model":             "yolo11m.pt",
     "confidence":        0.10,          # Low = detect more (incl. far vehicles)
     "min_box_area":      0,            # Far vehicles can be ~7x8=56px area
     "imgsz":             1600,          # KEY: higher res = far vehicles detected!

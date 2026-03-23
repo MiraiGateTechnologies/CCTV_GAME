@@ -1,263 +1,626 @@
 """
-================================================
-  STREAM MANAGER — Background clip downloader
-  Downloads + validates clips in background
-  Sirf "green light" (traffic moving) clips
-  ko scheduler ke liye queue mein rakhta hai
-================================================
+================================================================
+  STREAM MANAGER — Parallel Download + Single YOLO Pipeline
+================================================================
+
+Architecture (thread-safe, GPU-safe):
+
+  StreamDownloader (per stream, parallel, NO GPU):
+    Download 41s clip → quality check → push to download_queue
+
+  YOLOWorker (SINGLE instance, OWNS GPU):
+    Pick from download_queue → offline_count() → validate count
+    → push approved clips to ready_queue
+
+  Pipeline (coordinator):
+    Manages all downloaders + single worker
+    Exposes ready_queue to scheduler (fastest stream wins)
+
+Benefits over old ClipManager-per-stream approach:
+  - Parallel downloads: all streams download simultaneously
+  - Single YOLO thread: no ByteTrack tracker corruption
+  - Shared ready queue: no wasting time on low-traffic streams
+  - 4x faster cold start
 """
 
-# ┌─────────────────────────────────────────────────────────────────────┐
-# │  FILE   : stream_manager.py                                         │
-# │  PURPOSE: Background mein continuously clips download + validate    │
-# │           Agar traffic nahi chal rahi (red light) → clip reject     │
-# │           Agar traffic chal rahi → clip approve → scheduler ko de   │
-# │           Ye file STANDALONE hai — kisi aur file pe depend nahi     │
-# ├─────────────────────────────────────────────────────────────────────┤
-# │  CHANGE GUIDE — Agar kuch change karna ho:                          │
-# │                                                                     │
-# │  ► Clip kitne seconds ka ho                                         │
-# │    → CLIP_DURATION = 35  (neeche, line ~35)                        │
-# │                                                                     │
-# │  ► Validation speed (har kitne frames check karo)                   │
-# │    → VALIDATION_FPS_SKIP = 5  (har 5th frame check hota hai)       │
-# │      Kam karo = slow but accurate, zyada karo = fast but rough      │
-# │                                                                     │
-# │  ► Kitne frames movement hone chahiye "green" ke liye               │
-# │    → MIN_MOVEMENT_FRAMES = 10  (zyada karo = strict validation)     │
-# │                                                                     │
-# │  ► Validation ke liye YOLO model change karna ho                    │
-# │    → YOLO_MODEL_PATH = "yolo11m.pt"                                 │
-# │      (yolo11n.pt = fast/less accurate, yolo11x.pt = slow/accurate) │
-# │                                                                     │
-# │  ► Kaun se vehicles detect karo validation mein                     │
-# │    → _validate_clip() ke andar classes=[2, 3, 5, 7] (line ~119)    │
-# │      2=Car, 3=Motorcycle, 5=Bus, 7=Truck                           │
-# │                                                                     │
-# │  ► Minimum pixel movement threshold (5px → zyada = strict)          │
-# │    → _validate_clip() ke andar: if closest_dist > 5.0 (line ~144)  │
-# │                                                                     │
-# │  ► Kitne clips ready queue mein rakhe (max)                         │
-# │    → ClipManager.__init__: queue.Queue(maxsize=5) (line ~27)        │
-# └─────────────────────────────────────────────────────────────────────┘
-
 import os
-import cv2
 import sys
 import time
 import queue
 import threading
 import subprocess
-import ultralytics
 import tempfile
 import shutil
+import cv2
 
 # ─────────────────────────────────────────────
-#  SETTINGS — Yahan se tweak karo
+#  SETTINGS
 # ─────────────────────────────────────────────
-CLIP_DURATION = 35         # Har clip kitne seconds ka ho
-VALIDATION_FPS_SKIP = 5    # Har Nth frame check karo (speed vs accuracy)
-MIN_MOVEMENT_FRAMES = 10   # Kitne frames movement chahiye "green" ke liye
-YOLO_MODEL_PATH = "yolo11m.pt"  # Validation ke liye YOLO model
+CLIP_DURATION = 41            # Total clip length (35 counting + 6 waiting)
+COUNT_DURATION = 35           # Only count vehicles in first 35 seconds
+MIN_VEHICLE_COUNT = 1         # Minimum vehicles for a clip to be approved
+DOWNLOAD_TIMEOUT = 90         # Max seconds for ffmpeg download
+READY_QUEUE_MAX = 4           # Max pre-processed clips ready for rounds
+DOWNLOAD_QUEUE_MAX = 8        # Max downloaded-but-unprocessed clips waiting for YOLO
+MAX_PENDING_PER_STREAM = 2    # Max unprocessed clips per stream (throttle fast streams)
+YT_URL_CACHE_TTL = 2 * 3600  # Refresh YouTube URLs every 2 hours
 
-class ClipManager:
+
+# ─────────────────────────────────────────────
+#  DATA CLASSES
+# ─────────────────────────────────────────────
+
+class DownloadedClip:
+    """A clip downloaded and quality-checked, waiting for YOLO processing."""
+
+    def __init__(self, clip_path: str, stream_name: str,
+                 line_config_file: str, imgsz: int, confidence: float):
+        self.clip_path = clip_path
+        self.stream_name = stream_name
+        self.line_config_file = line_config_file
+        self.imgsz = imgsz
+        self.confidence = confidence
+        self.downloaded_at = time.time()
+
+
+class PreProcessedClip:
+    """Fully YOLO-processed clip ready for a game round."""
+
+    def __init__(self, clip_path: str, stream_name: str, result: int,
+                 detections: dict, counting_events: list,
+                 total_frames: int, clip_fps: float):
+        self.clip_path = clip_path
+        self.stream_name = stream_name
+        self.result = result
+        self.detections = detections
+        self.counting_events = counting_events
+        self.total_frames = total_frames
+        self.clip_fps = clip_fps
+        self.processed_at = time.time()
+
+
+# ─────────────────────────────────────────────
+#  STREAM DOWNLOADER — One per stream, parallel
+# ─────────────────────────────────────────────
+
+class StreamDownloader:
     """
-    Background manager that constantly downloads clips from a live stream,
-    validates them for traffic movement, and queues the good ones.
+    Downloads clips from a single live CCTV stream in its own thread.
+    No GPU, no YOLO — just ffmpeg download + quality check.
+    Pushes DownloadedClip objects to a shared download_queue.
     """
-    def __init__(self, stream_url, stream_name):
+
+    def __init__(self, stream_url: str, stream_name: str,
+                 line_config_file: str, download_queue: queue.Queue,
+                 imgsz: int = 1600, confidence: float = 0.10):
         self.stream_url = stream_url
         self.stream_name = stream_name
-        self.ready_queue = queue.Queue(maxsize=5) # Holds valid clip paths
+        self.line_config_file = line_config_file
+        self.download_queue = download_queue
+        self.imgsz = imgsz
+        self.confidence = confidence
         self.is_running = True
-        
-        # Temp directories
-        self.temp_dir = tempfile.mkdtemp(prefix="cctv_buffer_")
-        self.download_dir = os.path.join(self.temp_dir, "downloads")
-        self.validated_dir = os.path.join(self.temp_dir, "validated")
-        os.makedirs(self.download_dir, exist_ok=True)
-        os.makedirs(self.validated_dir, exist_ok=True)
-        
-        # Load YOLO model once for validation thread
-        print(f"[MANAGER] Loading YOLOv8 model for background validation...")
-        self.model = ultralytics.YOLO(YOLO_MODEL_PATH)
-        
-        # Start Threads
-        self.download_thread = threading.Thread(target=self._download_loop, daemon=True)
-        self.validate_thread = threading.Thread(target=self._validate_loop, daemon=True)
-        
-        self.download_queue = queue.Queue() # Holds unvalidated downloaded clip paths
-        
-        self.download_thread.start()
-        self.validate_thread.start()
 
-    def _extract_clip(self, output_path):
-        """Uses yt-dlp to download a 35s chunk."""
-        print(f"[DOWNLOADER] Fetching new clip for {self.stream_name}...")
+        # YouTube URL cache
+        self._resolved_url: str | None = None
+        self._resolved_time: float = 0.0
+
+        # Throttle: track how many of OUR clips are pending in download_queue
+        self.pending_count = 0
+        self._pending_lock = threading.Lock()
+
+        # Stats
+        self.clips_downloaded = 0
+        self.clips_quality_rejected = 0
+        self.download_failures = 0
+
+        # Temp directory
+        self.temp_dir = tempfile.mkdtemp(prefix=f"cctv_dl_{stream_name.replace(' ', '_')}_")
+
+        # Download thread
+        self.thread = threading.Thread(
+            target=self._download_loop, daemon=True,
+            name=f"DL-{stream_name}",
+        )
+        self.thread.start()
+
+    # ── URL Resolution ──
+
+    def _is_youtube(self) -> bool:
+        return "youtube.com" in self.stream_url or "youtu.be" in self.stream_url
+
+    def _resolve_download_url(self) -> str | None:
+        """YouTube → yt-dlp resolve (cached 2hr). HLS/RTSP → direct URL."""
+        if not self._is_youtube():
+            return self.stream_url
+
+        if self._resolved_url and (time.time() - self._resolved_time < YT_URL_CACHE_TTL):
+            return self._resolved_url
+
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [RESOLVE] {self.stream_name}: Resolving YouTube URL...")
+        try:
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                "--get-url",
+                "-f", "best[ext=mp4][height<=720]/best[ext=mp4]/best",
+                "--no-playlist",
+                self.stream_url,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            url = result.stdout.strip().split('\n')[0]
+            if url and url.startswith("http"):
+                self._resolved_url = url
+                self._resolved_time = time.time()
+                print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: OK")
+                return url
+            err = result.stderr.strip()[:200]
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Failed — {err}")
+            return None
+        except subprocess.TimeoutExpired:
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Timed out (30s)")
+            return None
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Error — {e}")
+            return None
+
+    # ── Download ──
+
+    def _download_clip(self, output_path: str) -> bool:
+        """Download clip via ffmpeg. No re-encoding (-c copy)."""
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] [DL] {self.stream_name}: Downloading {CLIP_DURATION}s clip...")
+
+        download_url = self._resolve_download_url()
+        if not download_url:
+            return False
+
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
         cmd = [
-            sys.executable, "-m", "yt_dlp",
-            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "--external-downloader", "ffmpeg",
-            "--external-downloader-args", f"ffmpeg:-ss 0 -t {CLIP_DURATION}",
-            self.stream_url,
-            "-o", output_path,
-            "--force-overwrites",
-            "--quiet", "--no-warnings"
+            "ffmpeg", "-y",
+            "-loglevel", "error",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-i", download_url,
+            "-t", str(CLIP_DURATION),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return os.path.exists(output_path)
-        except Exception as e:
-            print(f"[DOWNLOADER] Error fetching clip: {e}")
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT
+            )
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+                      f"Ready ({size_mb:.1f} MB)")
+                return True
+            else:
+                err_msg = result.stderr.strip()[:300] if result.stderr else "unknown"
+                print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+                      f"Failed — {err_msg}")
+                if self._is_youtube():
+                    self._resolved_url = None
+                return False
+        except subprocess.TimeoutExpired:
+            print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+                  f"Timed out ({DOWNLOAD_TIMEOUT}s)")
+            self._safe_delete(output_path)
+            return False
+        except FileNotFoundError:
+            print(f"[{time.strftime('%H:%M:%S')}] [DL] ERROR: ffmpeg not found!")
             return False
 
-    def _download_loop(self):
-        """Continuously downloads clips pushing them to validate queue."""
-        clip_counter = 0
-        while self.is_running:
-            # If we have enough validated clips and pending downloads, slow down
-            if self.ready_queue.qsize() >= 3 and self.download_queue.qsize() >= 2:
-                time.sleep(2)
-                continue
-                
-            clip_counter += 1
-            filename = f"raw_clip_{clip_counter}.mp4"
-            out_path = os.path.join(self.download_dir, filename)
-            
-            success = self._extract_clip(out_path)
-            if success:
-                self.download_queue.put(out_path)
-            else:
-                time.sleep(5) # Delay on error
+    # ── Quality Check ──
 
-    def _validate_clip(self, clip_path):
-        """Fast-forwards through a clip to check if cars are moving."""
-        print(f"[VALIDATOR] Scanning {os.path.basename(clip_path)} for traffic movement...")
+    def _check_quality(self, clip_path: str) -> tuple[bool, str]:
+        """Quick blur + brightness check on sampled frames."""
         cap = cv2.VideoCapture(clip_path)
         if not cap.isOpened():
-            return False
-            
-        frame_idx = 0
-        movement_score = 0
-        
-        # A simple heuristic: if we detect vehicles and they have bounding boxes, 
-        # we assume *some* movement. In a real red-light scenario, we'd compare box
-        # coordinates frame-over-frame (displacement). For speed, we just ensure 
-        # vehicles are detected consistently across frames.
-        
-        # Track previous centroids to check actual displacement
-        prev_centroids = []
-        consecutive_static = 0
-        
-        while cap.isOpened():
+            return False, "Cannot open clip"
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        sample_points = [int(total_frames * p) for p in [0.1, 0.3, 0.5, 0.7]]
+
+        for pos in sample_points:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
             ret, frame = cap.read()
             if not ret:
-                break
-                
-            frame_idx += 1
-            if frame_idx % VALIDATION_FPS_SKIP != 0:
-                continue # Skip frames for speed
-                
-            results = self.model.predict(
-                frame, 
-                classes=[2, 3, 5, 7], # Car, Motorcycle, Bus, Truck
-                conf=0.3, 
-                verbose=False
-            )
-            
-            current_centroids = []
-            valid_movement = False
-            
-            for r in results:
-                boxes = r.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    current_centroids.append((cx, cy))
-                    
-            # Compare with previous centroids
-            if prev_centroids and current_centroids:
-                for cx, cy in current_centroids:
-                    # Find closest in previous
-                    closest_dist = float('inf')
-                    for px, py in prev_centroids:
-                        dist = ((cx - px)**2 + (cy - py)**2)**0.5
-                        if dist < closest_dist:
-                            closest_dist = dist
-                    
-                    if closest_dist > 5.0: # Minimum 5 pixel movement
-                        valid_movement = True
-                        break
-            elif current_centroids:
-                # First frame with cars
-                valid_movement = True
-                
-            if valid_movement:
-                movement_score += 1
-                consecutive_static = 0
-            else:
-                consecutive_static += 1
-                
-            prev_centroids = current_centroids
-            
-            # If we've seen enough movement, early exit (Fast Validation)
-            if movement_score >= MIN_MOVEMENT_FRAMES:
-                cap.release()
-                return True
-                
-        cap.release()
-        return movement_score >= 5 # Lower threshold if clip was short
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur_val = cv2.Laplacian(gray, cv2.CV_64F).var()
+            bright_val = cv2.mean(gray)[0]
 
-    def _validate_loop(self):
-        """Pulls raw downloaded clips, validates them, queues good ones."""
+            if blur_val < 15:
+                cap.release()
+                return False, f"Too blurry ({blur_val:.1f})"
+            if bright_val < 10 or bright_val > 250:
+                cap.release()
+                return False, f"Bad brightness ({bright_val:.1f})"
+
+        cap.release()
+        return True, "OK"
+
+    # ── Main Download Loop ──
+
+    def _download_loop(self):
+        clip_counter = 0
+        consecutive_failures = 0
+
         while self.is_running:
+            # Throttle: don't pile up too many unprocessed clips
+            with self._pending_lock:
+                if self.pending_count >= MAX_PENDING_PER_STREAM:
+                    time.sleep(3)
+                    continue
+
+            # Back off on repeated failures
+            if consecutive_failures >= 5:
+                time.sleep(30)
+                consecutive_failures = 0
+                continue
+
+            clip_counter += 1
+            safe_name = self.stream_name.replace(' ', '_')
+            clip_path = os.path.join(self.temp_dir, f"{safe_name}_{clip_counter}.mp4")
+
+            # Download
+            if not self._download_clip(clip_path):
+                consecutive_failures += 1
+                self.download_failures += 1
+                time.sleep(5)
+                continue
+
+            consecutive_failures = 0
+            self.clips_downloaded += 1
+
+            # Quality check
+            quality_ok, reason = self._check_quality(clip_path)
+            if not quality_ok:
+                print(f"[DL] {self.stream_name}: Quality rejected — {reason}")
+                self._safe_delete(clip_path)
+                self.clips_quality_rejected += 1
+                continue
+
+            # Push to shared download queue for YOLO processing
+            dl_clip = DownloadedClip(
+                clip_path=clip_path,
+                stream_name=self.stream_name,
+                line_config_file=self.line_config_file,
+                imgsz=self.imgsz,
+                confidence=self.confidence,
+            )
+
+            with self._pending_lock:
+                self.pending_count += 1
+
+            # Blocks if download_queue is full (backpressure)
+            self.download_queue.put(dl_clip)
+
+    def clip_consumed(self):
+        """Called when YOLOWorker picks our clip from download_queue."""
+        with self._pending_lock:
+            self.pending_count = max(0, self.pending_count - 1)
+
+    def _safe_delete(self, path: str):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    def cleanup(self):
+        self.is_running = False
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────
+#  YOLO WORKER — Single instance, owns the GPU
+# ─────────────────────────────────────────────
+
+class YOLOWorker:
+    """
+    Single worker thread that processes all downloaded clips with YOLO.
+    Only ONE instance exists in the entire system — GPU safe, no tracker corruption.
+
+    Reads:  download_queue (DownloadedClip from any stream)
+    Writes: ready_queue (PreProcessedClip, approved clips only)
+    """
+
+    def __init__(self, model, download_queue: queue.Queue,
+                 ready_queue: queue.Queue, debug_mode: bool = False):
+        self.model = model
+        self.download_queue = download_queue
+        self.ready_queue = ready_queue
+        self.debug_mode = debug_mode
+        self.is_running = True
+
+        # Current processing state (for debug GUI)
+        self.current_stream_name = ""
+        self.current_config_path = ""
+
+        # Debug frame queue (--gui mode)
+        self.debug_frame_queue = queue.Queue(maxsize=1) if debug_mode else None
+
+        # Downloader references (for clip_consumed callback)
+        self._downloaders: dict[str, StreamDownloader] = {}
+
+        # Stats
+        self.clips_processed = 0
+        self.clips_approved = 0
+        self.clips_rejected = 0
+
+        self.thread = threading.Thread(
+            target=self._worker_loop, daemon=True, name="YOLOWorker",
+        )
+        self.thread.start()
+
+    def register_downloader(self, stream_name: str, downloader: StreamDownloader):
+        self._downloaders[stream_name] = downloader
+
+    def unregister_downloader(self, stream_name: str):
+        self._downloaders.pop(stream_name, None)
+
+    def _make_debug_callback(self, stream_name: str):
+        """Create debug callback that pushes annotated frames to debug queue."""
+        from core.counting import render_debug_frame
+
+        def _cb(frame, frame_no, counter, results, counting_active):
+            if self.debug_frame_queue is None:
+                return
+            annotated = frame.copy()
+            render_debug_frame(
+                annotated, counter, results, counting_active,
+                frame_no, 25.0, stream_name=stream_name,
+            )
+            # Non-blocking swap: drop old, push new
             try:
-                # Wait for a newly downloaded clip
-                raw_clip_path = self.download_queue.get(timeout=2)
-                
-                # is_valid = self._validate_clip(raw_clip_path)
-                is_valid = True
-                
-                if is_valid:
-                    print(f"[VALIDATOR] Clip APPROVED! Moving to ReadyQueue.")
-                    valid_name = f"valid_{os.path.basename(raw_clip_path)}"
-                    valid_path = os.path.join(self.validated_dir, valid_name)
-                    # Move to validated folder
-                    shutil.move(raw_clip_path, valid_path)
-                    
-                    # Block here if queue is full, so we don't over-download
-                    self.ready_queue.put(valid_path)
-                else:
-                    print(f"[VALIDATOR] Clip REJECTED (Red Light detected). Discarding.")
-                    os.remove(raw_clip_path)
-                    
-                self.download_queue.task_done()
-                
+                self.debug_frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.debug_frame_queue.put_nowait(annotated)
+            except queue.Full:
+                pass
+
+        return _cb
+
+    def _worker_loop(self):
+        from core.counting import offline_count
+
+        while self.is_running:
+            # Get next downloaded clip (any stream — fastest wins)
+            try:
+                dl_clip = self.download_queue.get(timeout=5)
             except queue.Empty:
                 continue
-            except Exception as e:
-                print(f"[VALIDATOR] Error: {e}")
 
-    def get_next_valid_clip(self, timeout=None):
+            # Notify the downloader that its clip was consumed
+            dl = self._downloaders.get(dl_clip.stream_name)
+            if dl:
+                dl.clip_consumed()
+
+            # Update current state for debug GUI
+            self.current_stream_name = dl_clip.stream_name
+            self.current_config_path = dl_clip.line_config_file
+
+            ts = time.strftime("%H:%M:%S")
+            print(f"[{ts}] [YOLO] Processing: {dl_clip.stream_name}")
+
+            debug_cb = self._make_debug_callback(dl_clip.stream_name) if self.debug_mode else None
+
+            start = time.time()
+            result = offline_count(
+                clip_path=dl_clip.clip_path,
+                line_config_file=dl_clip.line_config_file,
+                model=self.model,
+                count_duration=COUNT_DURATION,
+                confidence=dl_clip.confidence,
+                imgsz=dl_clip.imgsz,
+                debug_callback=debug_cb,
+            )
+            elapsed = time.time() - start
+            self.clips_processed += 1
+
+            if result is None:
+                print(f"[YOLO] {dl_clip.stream_name}: Processing FAILED")
+                self._safe_delete(dl_clip.clip_path)
+                self.clips_rejected += 1
+                continue
+
+            count = result["result"]
+            print(f"[YOLO] {dl_clip.stream_name}: count={count} | "
+                  f"{result['total_frames_processed']} frames | {elapsed:.1f}s")
+
+            if count < MIN_VEHICLE_COUNT:
+                print(f"[YOLO] {dl_clip.stream_name}: REJECTED "
+                      f"(count {count} < {MIN_VEHICLE_COUNT})")
+                self._safe_delete(dl_clip.clip_path)
+                self.clips_rejected += 1
+                continue
+
+            # APPROVED — create PreProcessedClip and push to ready queue
+            clip = PreProcessedClip(
+                clip_path=dl_clip.clip_path,
+                stream_name=dl_clip.stream_name,
+                result=count,
+                detections=result["detections"],
+                counting_events=result["counting_events"],
+                total_frames=result["total_frames_processed"],
+                clip_fps=result["clip_fps"],
+            )
+            self.clips_approved += 1
+            print(f"[YOLO] {dl_clip.stream_name}: APPROVED (count={count}) | "
+                  f"Ready: {self.ready_queue.qsize() + 1}/{READY_QUEUE_MAX}")
+
+            # Blocks if ready_queue full (backpressure — slows everything down gracefully)
+            self.ready_queue.put(clip)
+
+    def get_debug_frame(self):
+        """Get latest debug frame (non-blocking). Returns None if unavailable."""
+        if self.debug_frame_queue is None:
+            return None
+        try:
+            return self.debug_frame_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _safe_delete(self, path: str):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    def cleanup(self):
+        self.is_running = False
+
+
+# ─────────────────────────────────────────────
+#  PIPELINE — Coordinates everything
+# ─────────────────────────────────────────────
+
+class Pipeline:
+    """
+    Top-level coordinator for the parallel download + single YOLO pipeline.
+
+    Usage:
+        pipeline = Pipeline(model, debug_mode=True)
+        pipeline.add_stream("Stream 1", "https://...", "line_configs/Stream_1.json")
+        pipeline.add_stream("Stream 2", "https://...", "line_configs/Stream_2.json")
+
+        clip = pipeline.get_next_clip(timeout=120)  # any stream, fastest wins
+        pipeline.mark_clip_done(clip)
+        pipeline.cleanup()
+    """
+
+    def __init__(self, model, debug_mode: bool = False):
+        self.model = model
+        self.debug_mode = debug_mode
+
+        # Shared queues
+        self.download_queue = queue.Queue(maxsize=DOWNLOAD_QUEUE_MAX)
+        self.ready_queue = queue.Queue(maxsize=READY_QUEUE_MAX)
+
+        # Downloaders (one per stream)
+        self.downloaders: dict[str, StreamDownloader] = {}
+
+        # Single YOLO worker (owns the GPU)
+        self.yolo_worker = YOLOWorker(
+            model=model,
+            download_queue=self.download_queue,
+            ready_queue=self.ready_queue,
+            debug_mode=debug_mode,
+        )
+
+    def add_stream(self, stream_name: str, stream_url: str,
+                   line_config_file: str, imgsz: int = 1600,
+                   confidence: float = 0.10):
+        """Add a stream — starts downloading immediately in parallel."""
+        if stream_name in self.downloaders:
+            return
+
+        dl = StreamDownloader(
+            stream_url=stream_url,
+            stream_name=stream_name,
+            line_config_file=line_config_file,
+            download_queue=self.download_queue,
+            imgsz=imgsz,
+            confidence=confidence,
+        )
+        self.downloaders[stream_name] = dl
+        self.yolo_worker.register_downloader(stream_name, dl)
+
+        print(f"[PIPELINE] Added stream: {stream_name} "
+              f"(total: {len(self.downloaders)} downloaders)")
+
+    def remove_stream(self, stream_name: str):
+        """Stop and remove a stream's downloader."""
+        dl = self.downloaders.pop(stream_name, None)
+        if dl:
+            dl.cleanup()
+            self.yolo_worker.unregister_downloader(stream_name)
+
+    def remove_streams_not_in(self, keep_names: list[str]):
+        """Remove all streams NOT in the keep list (for time slot changes)."""
+        to_remove = [n for n in self.downloaders if n not in keep_names]
+        for name in to_remove:
+            self.remove_stream(name)
+
+    def get_next_clip(self, timeout: float = None) -> PreProcessedClip | None:
         """
-        Main function called by scheduler.py to get the next playable clip.
-        Blocks until a valid (Green Light) clip is ready.
+        Get next approved clip from ANY stream (fastest wins).
+        Blocks until available or timeout.
         """
         try:
             return self.ready_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
-    def mark_clip_done(self, clip_path):
-        """Call this when finished playing a clip so it gets deleted."""
+    def ready_count(self) -> int:
+        return self.ready_queue.qsize()
+
+    def mark_clip_done(self, clip: PreProcessedClip):
+        """Delete clip file after it's been played in a round."""
         try:
-            if os.path.exists(clip_path):
-                os.remove(clip_path)
-        except Exception as e:
-            print(f"[MANAGER] Failed to cleanup clip {clip_path}: {e}")
+            if os.path.exists(clip.clip_path):
+                os.remove(clip.clip_path)
+        except Exception:
+            pass
+
+    # ── Debug GUI support ──
+
+    def get_debug_frame(self):
+        """Get latest debug frame from YOLO worker (non-blocking)."""
+        return self.yolo_worker.get_debug_frame()
+
+    def get_debug_stream_info(self) -> dict:
+        """Get info about what the YOLO worker is currently processing."""
+        return {
+            "current_stream": self.yolo_worker.current_stream_name,
+            "config_path": self.yolo_worker.current_config_path,
+        }
+
+    # ── Stats ──
+
+    def get_stats(self) -> dict:
+        dl_stats = {}
+        for name, dl in self.downloaders.items():
+            dl_stats[name] = {
+                "downloaded": dl.clips_downloaded,
+                "quality_rejected": dl.clips_quality_rejected,
+                "pending": dl.pending_count,
+            }
+        return {
+            "downloaders": dl_stats,
+            "yolo": {
+                "processed": self.yolo_worker.clips_processed,
+                "approved": self.yolo_worker.clips_approved,
+                "rejected": self.yolo_worker.clips_rejected,
+                "current": self.yolo_worker.current_stream_name,
+            },
+            "ready_queue": self.ready_queue.qsize(),
+            "download_queue": self.download_queue.qsize(),
+        }
+
+    def get_stats_summary(self) -> str:
+        """One-line stats string for debug overlay."""
+        s = self.get_stats()
+        yolo = s["yolo"]
+        parts = [f"YOLO:{yolo['current'] or 'idle'}",
+                 f"Ready:{s['ready_queue']}/{READY_QUEUE_MAX}",
+                 f"DL_Q:{s['download_queue']}",
+                 f"OK:{yolo['approved']} Rej:{yolo['rejected']}"]
+        return " | ".join(parts)
 
     def cleanup(self):
-        """Stops the threads and deletes temporary files."""
-        print(f"[MANAGER] Cleaning up stream buffers...")
-        self.is_running = False
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        """Stop everything and clean up temp files."""
+        print("[PIPELINE] Cleaning up...")
+        self.yolo_worker.cleanup()
+        for dl in self.downloaders.values():
+            dl.cleanup()
+        self.downloaders.clear()

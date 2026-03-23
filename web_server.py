@@ -1,43 +1,42 @@
 """
-================================================
-  WEB SERVER — Browser pe live video stream
-  Flask MJPEG server — http://localhost:5000
-================================================
+================================================================
+  WEB SERVER — Browser live video + Game State API
+  Flask MJPEG streaming + JSON endpoints for frontend
+  http://localhost:5000
+================================================================
+
+Endpoints:
+  GET /              — HTML page with video stream
+  GET /video_feed    — MJPEG live video feed
+  GET /game_state    — Current round state JSON (phase, hash, odds, result)
+  GET /verify        — Verification data for completed round
 """
 
-# ┌─────────────────────────────────────────────────────────────────────┐
-# │  FILE   : web_server.py                                             │
-# │  PURPOSE: Browser mein live video dikhana (MJPEG streaming)         │
-# │           Flask server jo main.py / scheduler.py dono use karte     │
-# │           Ye file STANDALONE hai — kisi aur file pe depend nahi     │
-# ├─────────────────────────────────────────────────────────────────────┤
-# │  CHANGE GUIDE — Agar kuch change karna ho:                          │
-# │                                                                     │
-# │  ► Default port change karna ho (5000 → kuch aur)                  │
-# │    → start_server(host="0.0.0.0", port=5000) — port value badlo    │
-# │      Ya run karte waqt: python main.py --web-port 8080              │
-# │                                                                     │
-# │  ► JPEG stream quality change karni ho                              │
-# │    → generate_frames() ke andar cv2.imencode(".jpg", output_frame)  │
-# │      Badal ke: cv2.imencode(".jpg", output_frame, [cv2.IMWRITE_JPEG_QUALITY, 80]) │
-# │                                                                     │
-# │  ► HTML page (browser UI) change karni ho                           │
-# │    → templates/index.html file edit karo                            │
-# │                                                                     │
-# │  ► Naya API endpoint add karna ho (e.g., /stats, /count)           │
-# │    → @app.route("/your_route") decorator se naya function banao     │
-# └─────────────────────────────────────────────────────────────────────┘
-
 import cv2
+import json
 import threading
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, Response, jsonify
 
 app = Flask(__name__)
 
-# Global variable to hold the latest frame
-# We use a Lock to ensure thread-safety when updating/reading the frame
+# ── Frame buffer (thread-safe) ──
 output_frame = None
 lock = threading.Lock()
+
+# ── Game state (set by scheduler.py) ──
+_game_state = {
+    "phase": "IDLE",
+    "round_id": 0,
+    "stream_name": "",
+    "commitment_hash": "",
+    "bet_options": ["UNDER", "RANGE", "OVER", "EXACT"],
+}
+_game_state_lock = threading.Lock()
+
+# ── Verification data (revealed after round) ──
+_verification = {}
+_verification_lock = threading.Lock()
+
 
 def update_frame(frame):
     """Updates the global frame with the latest processed frame."""
@@ -45,32 +44,89 @@ def update_frame(frame):
     with lock:
         output_frame = frame.copy()
 
+
+def update_game_state(state: dict):
+    """Update the current game state (called by scheduler/round_manager)."""
+    with _game_state_lock:
+        _game_state.update(state)
+
+
+def update_verification(data: dict):
+    """Update verification data (called after round ends)."""
+    with _verification_lock:
+        _verification.update(data)
+
+
 def generate_frames():
     """Generator function that yields MJPEG chunks."""
     while True:
         with lock:
             if output_frame is None:
                 continue
-            # Encode frame to JPEG
             (flag, encoded_image) = cv2.imencode(".jpg", output_frame)
             if not flag:
                 continue
-        
-        # Yield the output frame in the byte format required for MJPEG
-        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
-              bytearray(encoded_image) + b'\r\n')
+
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' +
+               bytearray(encoded_image) + b'\r\n')
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 @app.route("/video_feed")
 def video_feed():
     return Response(generate_frames(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
+
+@app.route("/game_state")
+def game_state():
+    """
+    Current round state for frontend/backend consumption.
+
+    During BETTING:  {phase, round_id, stream_name, commitment_hash, bet_options}
+    During COUNTING: {phase, round_id, current_count, odds, thresholds, remaining}
+    During WAITING:  {phase, round_id, result, verification, bet_outcomes}
+    """
+    with _game_state_lock:
+        return jsonify(_game_state)
+
+
+@app.route("/verify")
+def verify():
+    """
+    Verification data for the last completed round.
+    Players use this to verify provably fair commitment.
+    """
+    with _verification_lock:
+        return jsonify(_verification)
+
+
+@app.route("/api/round")
+def api_round():
+    """
+    PRIMARY game data API — single source of truth.
+    All data goes through game/game_api.py only.
+
+    Returns: {phase, round_id, phase_timer, round_timer, vehicle_count,
+              commitment_hash, odds (if COUNTING/WAITING),
+              server_seed + result (if WAITING)}
+    """
+    from game.game_api import get_api_response
+    return jsonify(get_api_response())
+
+
 def start_server(port=5000, host="0.0.0.0"):
     """Starts the Flask server in a daemon thread."""
-    t = threading.Thread(target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False), daemon=True)
+    t = threading.Thread(
+        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
+        daemon=True,
+    )
     t.start()
     print(f"[WEB] Server started at http://localhost:{port}")
+    print(f"[WEB] API endpoint:  http://localhost:{port}/api/round")
+    print(f"[WEB] Verification:  http://localhost:{port}/verify")

@@ -70,47 +70,71 @@
             "start": "08:00",
             "end": "12:00",
             "streams": [
-                {
-                    "name": "Stream 10",
-                    "url": "https://www.youtube.com/live/l6EvTvOa1wc?si=px88YxeRoOy9h9Ti"
-                },
-                {
-                    "name": "Stream 9",
-                    "url": "https://w2.webcamromania.ro/piataromanab/index.m3u8"
-                },
-                {
-                    "name": "Stream 8",
-                    "url": "https://www.youtube.com/live/TSHqQy-ugQk?si=qiekbUKa5N2c4T7u"
-                },
-                {
-                    "name": "Stream 7",
-                    "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5"
-                },
-                {
-                    "name": "Stream 6",
-                    "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y"
-                },
-                {
-                    "name": "Stream 5",
-                    "url": "https://w2.webcamromania.ro/7GuraHumorului/index.m3u8"
-                },
-                {
-                    "name": "Stream 4",
-                    "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT"
-                },
-                {
-                    "name": "Stream 3",
-                    "url": "https://w2.webcamromania.ro/piatavoda/index.m3u8"
-                },
-                {
-                    "name": "Stream 2",
-                    "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl"
-                },
-                {
-                    "name": "Stream 1",
-                    "url": "https://www.youtube.com/live/JACr5CpjS_Q?si=VHNaST-2A7Dt4Tp2"
-                }
-            ]
+                        {
+                            "name": "Stream 1",
+                            "url": "https://nginx03.pride-net.ru/mend29/index.m3u8"
+                        },
+                        {
+                            "name": "Stream 1",
+                            "url": "https://www.youtube.com/live/fUsJZTHeZn4?si=ecO8LHOcBYNgWBnE"
+                        },
+                        {
+                            "name": "Stream 9",
+                            "url": "https://www.youtube.com/live/ad1366ZihfU?si=aAIZ7yVWNdfAODT9"
+                        },
+                        {
+                            "name": "Stream 8",
+                            "url": "https://www.youtube.com/live/9ZyKdBaRQrs?si=0i1_V62X6Y910R42"
+                        },
+                        {
+                            "name": "Stream 7",
+                            "url": "https://www.youtube.com/live/TSHqQy-ugQk?si=UgCg847i8olIC_I4"
+                        },
+                        {
+                            "name": "Stream 9",
+                            "url": "https://w2.webcamromania.ro/piataromanab/index.m3u8"
+                        },
+                        {
+                            "name": "Stream 10",
+                            "url": "https://www.youtube.com/live/TSHqQy-ugQk?si=qiekbUKa5N2c4T7u"
+                        },
+                        {
+                            "name": "Stream 11",
+                            "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5"
+                        },
+                        {
+                            "name": "Stream 12",
+                            "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y"
+                        },
+                        {
+                            "name": "Stream 13",
+                            "url": "https://w2.webcamromania.ro/7GuraHumorului/index.m3u8"
+                        },
+                        {
+                            "name": "Stream 14",
+                            "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT"
+                        },
+                        {
+                            "name": "Stream 15",
+                            "url": "https://w2.webcamromania.ro/piatavoda/index.m3u8"
+                        },
+                        {
+                            "name": "Stream 16",
+                            "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl"
+                        },
+                        {
+                            "name": "Stream 71",
+                            "url": "https://5a7d54e35f9d2.streamlock.net/av85/av85.stream/playlist.m3u8"
+                        },
+                        {
+                            "name": "Stream 18",
+                            "url": "https://w2.webcamromania.ro/piataromanab/index.m3u8"
+                        },
+                        {
+                            "name": "Stream 19",
+                            "url": "https://www.youtube.com/live/gTO_FJzv70k?si=ImZZ9pjqYuoGOOpB"
+                        }
+                        ]
         },
         {
             "start": "12:00",
@@ -121,6 +145,23 @@
                     "url": "https://w2.webcamromania.ro/piataromanab/index.m3u8"
                 },
                 {
+                    "name": "Stream 13",
+                    "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI"
+                },
+                {
+                    "name": "Stream 12",
+                    "url": "https://nginx03.pride-net.ru/omsk2/index.m3u8"
+                },
+                {
+                    "name": "Stream 11",
+                    "url": "https://nginx01.pride-net.ru/cam_inter2g_i_1/index.m3u8"
+                },
+                {
+                    "name": "Stream 10",
+                    "url": "https://nginx03.pride-net.ru/gk40/index.m3u8"
+                },
+                
+                {
                     "name": "Stream 8",
                     "url": "https://www.youtube.com/live/TSHqQy-ugQk?si=qiekbUKa5N2c4T7u"
                 },
@@ -150,7 +191,7 @@
                 },
                 {
                     "name": "Stream 1",
-                    "url": "https://www.youtube.com/live/JACr5CpjS_Q?si=VHNaST-2A7Dt4Tp2"
+                    "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=eA38oVZcj11GBBJT"
                 }
             ]
         },

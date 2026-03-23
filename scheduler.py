@@ -1,396 +1,585 @@
 """
-================================================
-  TIME-SLOTTED CCTV STREAM SCHEDULER
-  Cycles through live streams by IST time slot
-  Globe animation during transitions
-================================================
+================================================================
+  CCTV CASINO GAME — Main Scheduler
+  Parallel Download + Single YOLO + Provably Fair + Round Cycle
+================================================================
+
+Architecture:
+  StreamDownloader (per stream, parallel) → download_queue
+  YOLOWorker (single, GPU-safe) → ready_queue
+  Scheduler picks from ready_queue (fastest stream wins)
+
+Round Cycle (56 seconds):
+  1. BETTING  (15 sec) — No stream, hash published, players bet
+  2. COUNTING (35 sec) — Pre-recorded clip plays with detection overlay
+  3. WAITING  (6 sec)  — Stream continues, count frozen, result reveal
+
+Modes:
+  python scheduler.py --config streams_config.json
+      → Production: web browser only (http://localhost:5000)
+
+  python scheduler.py --config streams_config.json --gui
+      → Development: web + debug GUI showing live YOLO processing
+        with mouse support for drawing counting line/ROI
 """
+
 import cv2
 import numpy as np
 import sys
 import os
 import time
 import argparse
-import shutil
-import threading
-from ultralytics import YOLO
 import math
+from ultralytics import YOLO
 
-# ── Import Refactored Modules ───────────────────────────────────────
-from core.counting import VehicleCounter
-from core.config_manager import load_streams_config
-from ui.animations import show_globe_transition, show_results_screen, ist_now_str
+# ── Import Modules ─────────────────────────────────────────────────
+from core.config_manager import load_streams_config, load_line_config, save_line_config
+from ui.animations import ist_now_str, IST
+from ui.renderer import draw_playback_overlay, reset_playback_flash
 import web_server
-from network.stream_manager import ClipManager
-from network.download import get_stream_url
-from ui.renderer import draw_dashboard, draw_glow_bracket, draw_zones
+from network.stream_manager import Pipeline, PreProcessedClip
+from game.round_manager import (
+    prepare_round, play_clip_with_overlay, finalize_round,
+    get_betting_phase_data, get_counting_phase_data, get_waiting_phase_data,
+    BETTING_DURATION, COUNTING_DURATION, WAITING_DURATION, RoundData,
+)
+from game.history_tracker import HistoryTracker
+import game.game_api as game_api
 
-# ── Defaults ─────────────────────────────────────────────────────────
-DEFAULT_CONFIG     = "streams_config.json"
-DEFAULT_MODEL      = "yolo11m.pt"
-DEFAULT_CLIP_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos", "temp")
-LINE_CONFIGS_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "line_configs")
-WINDOW_NAME        = "CCTV Stream Scheduler"
+# ── Defaults ───────────────────────────────────────────────────────
+DEFAULT_CONFIG = "streams_config.json"
+DEFAULT_MODEL = "yolov8l.pt"
+LINE_CONFIGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "line_configs")
+DEBUG_WINDOW = "DEBUG: Background YOLO Processing"
 WINDOW_W, WINDOW_H = 1280, 720
 
-def stream_config_path(stream_name):
-    """Get per-stream line/ROI config file path."""
-    safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in stream_name)
-    safe_name = safe_name.strip().replace(' ', '_')
-    os.makedirs(LINE_CONFIGS_DIR, exist_ok=True)
-    return os.path.join(LINE_CONFIGS_DIR, f"{safe_name}.json")
+# ── Global State ───────────────────────────────────────────────────
+debug_gui = False
+current_round_data: RoundData | None = None
 
-def time_to_minutes(t_str):
+# ── Debug Drawing State (mouse callbacks in --gui mode) ────────────
+_debug_draw = {
+    "drawing_line": False,
+    "temp_line": None,
+    "poly_points": [],
+    "poly_preview_pt": None,
+    "config_path": None,
+    "stream_name": "",
+    "last_frame": None,
+}
+
+
+def stream_config_path(stream_name: str) -> str:
+    """Get per-stream line/ROI config file path."""
+    safe = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in stream_name)
+    safe = safe.strip().replace(' ', '_')
+    os.makedirs(LINE_CONFIGS_DIR, exist_ok=True)
+    return os.path.join(LINE_CONFIGS_DIR, f"{safe}.json")
+
+
+def time_to_minutes(t_str: str) -> int:
     h, m = map(int, t_str.split(":"))
     return h * 60 + m
 
-def get_active_slot(slots):
+
+def get_active_slot(slots: list) -> dict:
+    """Get the currently active time slot based on IST."""
     from datetime import datetime
-    from ui.animations import IST
     now = datetime.now(IST)
     now_mins = now.hour * 60 + now.minute
 
     for slot in slots:
         start = time_to_minutes(slot["start"])
-        end   = time_to_minutes(slot["end"])
+        end = time_to_minutes(slot["end"])
         if end <= start:
             if now_mins >= start or now_mins < end:
                 return slot
         else:
             if start <= now_mins < end:
                 return slot
+
+    for slot in slots:
+        if slot.get("streams"):
+            return slot
     return slots[0]
 
-def resolve_stream_url(url):
-    if "youtube.com" in url or "youtu.be" in url:
-        try:
-            return get_stream_url(url)
-        except SystemExit:
-            return None
-    return url
 
-# ═════════════════════════════════════════════════════════════════════
-#  VEHICLE COUNTING ON CLIP
-# ═════════════════════════════════════════════════════════════════════
-def run_counting_on_clip(clip_path, model, stream_name, count_duration, config_file=None, imgsz=960, skip_frames=1):
-    global gui_enabled
-    cap = cv2.VideoCapture(clip_path)
-    if not cap.isOpened():
-        print(f"[{ist_now_str()}] ERROR: Cannot open clip: {clip_path}")
-        return {"total": 0, "class_counts": {}, "error": True}
+# ═══════════════════════════════════════════════════════════════════
+#  DEBUG GUI — Mouse callbacks + window (--gui mode only)
+# ═══════════════════════════════════════════════════════════════════
 
-    counter = VehicleCounter(config_file=config_file if config_file else "line_config.json")
-    counter.phase = "COUNT"
-    counter.phase_start = time.time()
+def _debug_mouse_callback(event, x, y, flags, param):
+    """Mouse callback for debug window — draw line or ROI polygon."""
+    state = _debug_draw
+    cfg_path = state.get("config_path")
+    if not cfg_path:
+        return
 
-    def mouse_click(event, x, y, flags, param):
-        if counter.last_h is None: return
-        import math
-        if event == cv2.EVENT_LBUTTONDOWN:
-            counter.drawing_line = True
-            counter.temp_line = [(x, y), (x, y)]
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if counter.drawing_line:
-                counter.temp_line[1] = (x, y)
-            if counter.poly_points:
-                counter.poly_preview_pt = (x, y)
-        elif event == cv2.EVENT_LBUTTONUP:
-            if counter.drawing_line:
-                counter.drawing_line = False
-                counter.temp_line[1] = (x, y)
-                if math.hypot(x - counter.temp_line[0][0], y - counter.temp_line[0][1]) >= 10:
-                    counter.line = list(counter.temp_line)
-                    counter.mode = "line"
-                    counter.roi_poly = None
-                    counter.save_config()
-                counter.temp_line = None
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            counter.poly_points.append((x, y))
-            if len(counter.poly_points) == 4:
-                counter.roi_poly = list(counter.poly_points)
-                counter.poly_points = []
-                counter.poly_preview_pt = None
-                counter.mode = "roi"
-                counter.save_config()
+    if event == cv2.EVENT_LBUTTONDOWN:
+        state["drawing_line"] = True
+        state["temp_line"] = [(x, y), (x, y)]
 
-    if gui_enabled:
-        cv2.setMouseCallback(WINDOW_NAME, mouse_click)
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if state["drawing_line"] and state["temp_line"]:
+            state["temp_line"][1] = (x, y)
+        if state["poly_points"]:
+            state["poly_preview_pt"] = (x, y)
 
-    frame_count = 0
-    fps_timer = time.time()
-    display_fps = 0
-    last_results = None
-    user_quit = False
-    
-    bad_quality_count = 0
-    last_blur_val = 100.0
-    last_bright_val = 100.0
+    elif event == cv2.EVENT_LBUTTONUP:
+        if state["drawing_line"] and state["temp_line"]:
+            state["drawing_line"] = False
+            state["temp_line"][1] = (x, y)
+            line_len = math.hypot(x - state["temp_line"][0][0],
+                                  y - state["temp_line"][0][1])
+            if line_len >= 10:
+                data = {"line": list(state["temp_line"]), "roi_poly": None, "mode": "line"}
+                save_line_config(cfg_path, data)
+                print(f"[DEBUG GUI] Line saved: {state['stream_name']}")
+            state["temp_line"] = None
 
-    VEHICLE_CLASSES = {2: "Car", 5: "Bus", 7: "Truck"}
-    
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        state["poly_points"].append((x, y))
+        if len(state["poly_points"]) == 4:
+            data = {"line": None, "roi_poly": list(state["poly_points"]), "mode": "roi"}
+            save_line_config(cfg_path, data)
+            print(f"[DEBUG GUI] ROI saved: {state['stream_name']}")
+            state["poly_points"] = []
+            state["poly_preview_pt"] = None
+
+    elif event == cv2.EVENT_MBUTTONDOWN:
+        state["poly_points"] = []
+        state["poly_preview_pt"] = None
+
+
+def _draw_debug_mouse_overlay(frame):
+    """Draw in-progress line/ROI on the debug frame."""
+    state = _debug_draw
+    h = frame.shape[0]
+
+    if state["drawing_line"] and state["temp_line"]:
+        pt1, pt2 = state["temp_line"]
+        cv2.line(frame, tuple(pt1), tuple(pt2), (0, 255, 255), 2, cv2.LINE_AA)
+
+    if state["poly_points"]:
+        for pt in state["poly_points"]:
+            cv2.circle(frame, pt, 6, (0, 100, 255), -1)
+        for i in range(1, len(state["poly_points"])):
+            cv2.line(frame, state["poly_points"][i - 1],
+                     state["poly_points"][i], (0, 100, 255), 2)
+        if state["poly_preview_pt"]:
+            cv2.line(frame, state["poly_points"][-1],
+                     state["poly_preview_pt"], (0, 100, 255), 1)
+        n = len(state["poly_points"])
+        cv2.putText(frame, f"ROI: {n}/4 corners (RClick {4 - n} more | MidBtn=cancel)",
+                    (10, h - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+
+def setup_debug_window():
+    cv2.namedWindow(DEBUG_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(DEBUG_WINDOW, WINDOW_W, WINDOW_H)
+    cv2.setMouseCallback(DEBUG_WINDOW, _debug_mouse_callback)
+    print("[DEBUG GUI] Window created — draw lines/ROI with mouse")
+
+
+def update_debug_window(pipeline: Pipeline) -> int:
+    """
+    Poll latest debug frame from YOLO worker and display.
+    Updates mouse callback state for the currently-processing stream.
+    Returns key press (0xFF masked) or 0.
+    """
+    frame = pipeline.get_debug_frame()
+
+    if frame is not None:
+        # Update which stream the mouse callback saves to
+        info = pipeline.get_debug_stream_info()
+        _debug_draw["config_path"] = info.get("config_path") or ""
+        _debug_draw["stream_name"] = info.get("current_stream") or ""
+
+        _draw_debug_mouse_overlay(frame)
+
+        # Stats overlay
+        stats_text = pipeline.get_stats_summary()
+        cv2.putText(frame, stats_text, (frame.shape[1] - 500, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1, cv2.LINE_AA)
+
+        _debug_draw["last_frame"] = frame
+        cv2.imshow(DEBUG_WINDOW, frame)
+
+    elif _debug_draw["last_frame"] is not None:
+        cv2.imshow(DEBUG_WINDOW, _debug_draw["last_frame"])
+
+    return cv2.waitKey(1) & 0xFF
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  BETTING PHASE — 15 seconds, no stream
+# ═══════════════════════════════════════════════════════════════════
+
+def show_betting_phase(rd: RoundData, duration: float,
+                       pipeline: Pipeline = None) -> bool:
+    global current_round_data
+    current_round_data = rd
+    rd.phase = "BETTING"
+    rd.phase_start_time = time.time()
+    web_server.update_game_state(get_betting_phase_data(rd))
+
+    # Update game_api — single source of truth for all data
+    game_api.update_phase(
+        "BETTING", round_id=rd.round_id, stream_name=rd.stream_name,
+        commitment_hash=rd.commitment_hash,
+        odds=rd.odds, under_threshold=rd.under_threshold,
+        over_threshold=rd.over_threshold, exact_odds=rd.exact_odds,
+    )
+
+    start = time.time()
     while True:
-        ret, frame = cap.read()
-        if not ret: break
-        
-        frame_count += 1
-        
-        # --- Stream Quality Check ---
-        if frame_count % 90 == 1:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            last_blur_val = cv2.Laplacian(gray, cv2.CV_64F).var()
-            last_bright_val = cv2.mean(gray)[0]
-            
-            if last_blur_val < 15 or last_bright_val < 10 or last_bright_val > 250:
-                bad_quality_count += 1
-            else:
-                bad_quality_count = 0
-                
-            if bad_quality_count >= 2:
-                print(f"[{ist_now_str()}] WARNING: Stream {stream_name} rejected. Quality blocked/unclear (Blur={last_blur_val:.1f}, Bright={last_bright_val:.1f})")
-                if gui_enabled:
-                    overlay = frame.copy()
-                    cv2.rectangle(overlay, (0,0), (frame.shape[1], frame.shape[0]), (0,0,200), -1)
-                    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-                    cv2.putText(frame, "STREAM REJECTED : CAMERA BLOCKED", (max(10, frame.shape[1]//2 - 350), frame.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-                    for _ in range(30):
-                        web_server.update_frame(frame)
-                        cv2.imshow(WINDOW_NAME, frame)
-                        if cv2.waitKey(33) == ord('q'):
-                            user_quit = True
-                            break
-                            
-                cap.release()
-                return {"total": 0, "class_counts": {}, "error": True, "reason": "Camera Blocked or Blur"}
-
-        if frame_count % 30 == 0:
-            elapsed = time.time() - fps_timer
-            display_fps = 30 / elapsed if elapsed > 0 else 0
-            fps_timer = time.time()
-
-        counter.set_frame_size(frame.shape[0], frame.shape[1])
-        counting_active = True
-        counter.phase = "COUNT"
-
-        if frame_count % skip_frames == 0 or last_results is None:
-            results = model.track(
-                frame, persist=True, classes=[2, 5, 7], conf=0.10,
-                imgsz=imgsz, half=True, verbose=False, device=0,
-                tracker="bytetrack.yaml", iou=0.5
-            )
-            last_results = results
-        else:
-            results = last_results
-
-        # Business Logic
-        dots = counter.process_detections(results, counting_active, VEHICLE_CLASSES, 0, 0.10)
-
-        # UI Overlay
-        draw_zones(frame, counter, (0, 255, 0), (0, 200, 255))
-        for (cx, cy) in dots:
-            cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
-
-        for track_id, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
-            draw_glow_bracket(frame, fcx, fcy, fbox_half, track_id, counter, 4, (0, 255, 0), 28, 3)
-
-        # Scheduler specific dashboard 
-        h, w = frame.shape[:2]
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (350, 275), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-        y = 30
-        cv2.putText(frame, f"STREAM: {stream_name}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-        y += 28
-        cv2.putText(frame, f"IST: {ist_now_str()}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 200, 255), 1)
-        y += 22
-        q_color = (0, 200, 0) if bad_quality_count == 0 else (0, 0, 255)
-        cv2.putText(frame, f"QUALITY: Blur {last_blur_val:.0f} | Bright {last_bright_val:.0f}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, q_color, 1)
-        y += 24
-        cv2.putText(frame, f"COUNT: {counter.interval_total}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-        y += 28
-        for cls_name, cnt in counter.interval_class_counts.items():
-            cv2.putText(frame, f"  {cls_name}: {cnt}", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-            y += 20
-
-        cv2.putText(frame, f"FPS: {display_fps:.1f}", (w - 120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames > 0:
-            clip_progress = frame_count / total_frames
-            bar_x, bar_y, bar_w, bar_h = 10, h - 55, w - 20, 22
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 40), -1)
-            fill = int(bar_w * clip_progress)
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill, bar_y + bar_h), (0, 200, 60), -1)
-            cv2.putText(frame, f"Processing clip: {int(clip_progress * 100)}%  |  Q=Quit",
-                        (bar_x + 8, bar_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
-
-        web_server.update_frame(frame)
-        if not gui_enabled:
-            key = cv2.waitKey(1) & 0xFF
-        else:
-            cv2.imshow(WINDOW_NAME, frame)
-            key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            user_quit = True
+        elapsed = time.time() - start
+        if elapsed >= duration:
             break
 
-    cap.release()
-    result = {"total": counter.interval_total, "class_counts": dict(counter.interval_class_counts), "frames_processed": frame_count}
-    return None if user_quit else result
+        frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
+        for y_row in range(WINDOW_H):
+            val = int(15 + 12 * (y_row / WINDOW_H))
+            frame[y_row, :] = (val, val + 3, val + 8)
+
+        cx = WINDOW_W // 2
+        remaining = int(duration - elapsed) + 1
+
+        cv2.putText(frame, "PLACE YOUR BETS", (cx - 150, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 200), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"Round #{rd.round_id}", (cx - 60, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Stream: {rd.stream_name}", (cx - 100, 130),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
+
+        hash_short = rd.commitment_hash[:16] + "..."
+        cv2.putText(frame, f"Hash: {hash_short}", (cx - 120, 170),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 150, 200), 1, cv2.LINE_AA)
+
+        # 4 bet option boxes
+        box_w, box_h, gap = 200, 80, 30
+        start_x = cx - box_w - gap // 2
+        start_y = 220
+        options = ["UNDER", "RANGE", "OVER", "EXACT"]
+        colors = [(255, 100, 100), (100, 255, 100), (100, 100, 255), (255, 255, 100)]
+
+        for i, (opt, col) in enumerate(zip(options, colors)):
+            bx = start_x + (i % 2) * (box_w + gap)
+            by = start_y + (i // 2) * (box_h + gap)
+            cv2.rectangle(frame, (bx, by), (bx + box_w, by + box_h), col, 2, cv2.LINE_AA)
+            t_size = cv2.getTextSize(opt, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            cv2.putText(frame, opt,
+                        (bx + (box_w - t_size[0]) // 2, by + (box_h + t_size[1]) // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+
+        cv2.putText(frame, f"{remaining}", (cx - 20, 500),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 255, 200), 3, cv2.LINE_AA)
+        cv2.putText(frame, "seconds", (cx - 40, 530),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"IST {ist_now_str()}", (WINDOW_W - 180, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 140, 180), 1, cv2.LINE_AA)
+
+        web_server.update_frame(frame)
+
+        # CRITICAL: Always call cv2.waitKey to process Windows messages
+        # Without this → "NOT RESPONDING" error
+        if debug_gui and pipeline:
+            key = update_debug_window(pipeline)
+        else:
+            key = cv2.waitKey(30) & 0xFF
+        if key == ord('q'):
+            return True
+
+    return False
 
 
-# ═════════════════════════════════════════════════════════════════════
-#  MAIN SCHEDULER LOOP
-# ═════════════════════════════════════════════════════════════════════
-gui_enabled = True
+# ═══════════════════════════════════════════════════════════════════
+#  COUNTING + WAITING PHASE — 35s + 6s, clip plays
+# ═══════════════════════════════════════════════════════════════════
 
-def run_scheduler(config_path, model_name, imgsz, skip_frames, no_gui=False, web_port=5000):
-    global gui_enabled
-    gui_enabled = not no_gui
+def play_round_clip(rd: RoundData, pipeline: Pipeline = None) -> bool:
+    global current_round_data
+    current_round_data = rd
+    rd.phase = "COUNTING"
+    rd.phase_start_time = time.time()
+
+    line_config = load_line_config(stream_config_path(rd.stream_name))
+    reset_playback_flash()
+    user_quit = False
+
+    def frame_callback(frame, frame_no, current_count, counting_active,
+                       elapsed_secs, detections):
+        nonlocal user_quit
+
+        if counting_active:
+            rd.phase = "COUNTING"
+            web_server.update_game_state(
+                get_counting_phase_data(rd, current_count, elapsed_secs))
+            # Update game_api with live count
+            if frame_no == 0:
+                game_api.update_phase("COUNTING")
+            game_api.update_count(current_count)
+        else:
+            rd.phase = "WAITING"
+            if frame_no == int(COUNTING_DURATION * (rd.clip.clip_fps or 25)):
+                web_server.update_game_state(get_waiting_phase_data(rd))
+                game_api.update_phase(
+                    "WAITING", server_seed=rd.server_seed,
+                    result=rd.result, vehicle_count=rd.result,
+                )
+
+        draw_playback_overlay(
+            frame, frame_no, current_count, counting_active, elapsed_secs,
+            detections, stream_name=rd.stream_name,
+            count_duration=COUNTING_DURATION, wait_duration=WAITING_DURATION,
+            line_config=line_config,
+        )
+
+        web_server.update_frame(frame)
+
+        if debug_gui and pipeline:
+            key = update_debug_window(pipeline)
+            if key == ord('q'):
+                user_quit = True
+
+    play_clip_with_overlay(
+        rd.clip, frame_callback, lambda: user_quit,
+        count_duration=COUNTING_DURATION, wait_duration=WAITING_DURATION,
+    )
+    return user_quit
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MAIN SCHEDULER
+# ═══════════════════════════════════════════════════════════════════
+
+def run_scheduler(config_path: str, model_name: str, imgsz: int,
+                  gui: bool = False, web_port: int = 5000):
+    global debug_gui, current_round_data
+    debug_gui = gui
 
     web_server.start_server(web_port)
     slots, count_duration, transition_duration = load_streams_config(config_path)
+    history = HistoryTracker()
 
-    print(f"\n{'='*55}")
-    print(f"  CCTV STREAM SCHEDULER")
-    print(f"  Config        : {config_path}")
-    print(f"  Model         : {model_name}")
-    print(f"  Clip duration : {count_duration}s")
-    print(f"  Transition    : {transition_duration}s")
-    print(f"  IST now       : {ist_now_str()}")
-    print(f"{'='*55}\n")
+    mode_str = "DEVELOPMENT (web + debug GUI)" if debug_gui else "PRODUCTION (web only)"
+    print(f"\n{'=' * 60}")
+    print(f"  CCTV CASINO GAME — Scheduler")
+    print(f"  Mode           : {mode_str}")
+    print(f"  Config         : {config_path}")
+    print(f"  Model          : {model_name}")
+    print(f"  Round cycle    : {BETTING_DURATION}s bet + {COUNTING_DURATION}s count + {WAITING_DURATION}s wait = 56s")
+    print(f"  Web            : http://localhost:{web_port}")
+    print(f"  IST now        : {ist_now_str()}")
+    print(f"{'=' * 60}\n")
 
+    print("[INIT] Loading YOLO model...")
     model = YOLO(model_name).to("cuda")
-    if gui_enabled:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW_NAME, WINDOW_W, WINDOW_H)
-    os.makedirs(DEFAULT_CLIP_DIR, exist_ok=True)
+    print("[INIT] Model ready!")
 
-    slot_indices = {}
-    cycle_count = 0
-    clip_managers = {} 
+    if debug_gui:
+        setup_debug_window()
 
-    def get_or_create_manager(name, url):
-        if name not in clip_managers:
-            direct = resolve_stream_url(url)
-            if not direct: return None
-            clip_managers[name] = ClipManager(stream_url=direct, stream_name=name)
-        return clip_managers[name]
-        
-    def cleanup_managers():
-        for name, mgr in clip_managers.items():
-            mgr.cleanup()
-        clip_managers.clear()
+    # Create pipeline (parallel downloads + single YOLO worker)
+    pipeline = Pipeline(model=model, debug_mode=debug_gui)
 
-    def peek_next_stream():
-        active_slot = get_active_slot(slots)
-        key = f"{active_slot['start']}-{active_slot['end']}"
-        streams = active_slot.get("streams", [])
-        if not streams: return None, None
-        next_idx = slot_indices.get(key, 0) % len(streams)
-        s = streams[next_idx]
-        return s.get("name", f"Stream {next_idx+1}"), s.get("url", "")
+    round_counter = 0
+    prev_slot_key = None
 
-    first_name, first_url = peek_next_stream()
-    if first_name and first_url:
-        first_mgr = get_or_create_manager(first_name, first_url)
-        anim_start = time.time()
-        while first_mgr and first_mgr.ready_queue.qsize() == 0:
-            el = time.time() - anim_start
-            if el > 240: break
-            
-            frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
-            for yr in range(WINDOW_H):
-                v = int(15 + 10 * (yr / WINDOW_H))
-                frame[yr, :] = (v, v + 5, v + 10)
+    def add_slot_streams(slot):
+        """Add all streams in a time slot to the pipeline."""
+        streams = slot.get("streams", [])
+        for s in streams:
+            name = s.get("name", "")
+            url = s.get("url", "")
+            if name and url:
+                cfg_path = stream_config_path(name)
+                pipeline.add_stream(name, url, cfg_path, imgsz=imgsz)
 
-            gcx, gcy = WINDOW_W // 2, WINDOW_H // 2 - 40
-            angle = el * 0.8
-            progress = 0.5 + 0.5 * abs(math.sin(el * 2))
-            
-            from ui.animations import draw_globe
-            draw_globe(frame, gcx, gcy, 120, angle, progress)
-            cv2.putText(frame, "CCTV STREAM SCHEDULER", (WINDOW_W // 2 - 160, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 180, 255), 2, cv2.LINE_AA)
-            cv2.putText(frame, f"IST {ist_now_str()}", (WINDOW_W - 180, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 140, 180), 1, cv2.LINE_AA)
+    # ── Cold start: add all streams from current slot ──
+    active_slot = get_active_slot(slots)
+    add_slot_streams(active_slot)
+    print(f"[STARTUP] {len(pipeline.downloaders)} streams downloading in parallel")
+    print(f"[STARTUP] Waiting for first approved clip...")
 
-            web_server.update_frame(frame)
-            if not gui_enabled:
-                key = cv2.waitKey(30) & 0xFF
-            else:
-                cv2.imshow(WINDOW_NAME, frame)
-                key = cv2.waitKey(30) & 0xFF
-            if key == ord('q'):
-                if gui_enabled: cv2.destroyAllWindows()
-                cleanup_managers()
-                return
+    # Wait for first clip with loading animation
+    anim_start = time.time()
+    while pipeline.ready_count() == 0 and time.time() - anim_start < 300:
+        el = time.time() - anim_start
+        frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
+        for yr in range(WINDOW_H):
+            v = int(15 + 10 * (yr / WINDOW_H))
+            frame[yr, :] = (v, v + 5, v + 10)
 
+        from ui.animations import draw_globe
+        gcx, gcy = WINDOW_W // 2, WINDOW_H // 2 - 40
+        draw_globe(frame, gcx, gcy, 120, el * 0.8, 0.5 + 0.5 * abs(math.sin(el * 2)))
+
+        cv2.putText(frame, "CCTV CASINO GAME", (WINDOW_W // 2 - 140, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 180, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "Preparing first round...", (WINDOW_W // 2 - 130, WINDOW_H // 2 + 160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"IST {ist_now_str()}", (WINDOW_W - 180, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 140, 180), 1, cv2.LINE_AA)
+
+        stats = pipeline.get_stats()
+        yolo = stats["yolo"]
+        dl_count = sum(d["downloaded"] for d in stats["downloaders"].values())
+        cv2.putText(frame,
+                    f"Downloads: {dl_count} | YOLO: {yolo['current'] or 'waiting'} | "
+                    f"Approved: {yolo['approved']} | Ready: {stats['ready_queue']}",
+                    (WINDOW_W // 2 - 250, WINDOW_H // 2 + 200),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 150, 200), 1, cv2.LINE_AA)
+
+        web_server.update_frame(frame)
+
+        # CRITICAL: cv2.waitKey processes Windows messages — prevents "NOT RESPONDING"
+        if debug_gui:
+            key = update_debug_window(pipeline)
+        else:
+            key = cv2.waitKey(30) & 0xFF
+        if key == ord('q'):
+            pipeline.cleanup()
+            if debug_gui:
+                cv2.destroyAllWindows()
+            return
+
+    # ── Main round loop ──
     try:
         while True:
+            # Check for time slot change
             active_slot = get_active_slot(slots)
             slot_key = f"{active_slot['start']}-{active_slot['end']}"
-            streams = active_slot.get("streams", [])
 
-            if not streams:
-                time.sleep(60)
-                continue
+            if slot_key != prev_slot_key and prev_slot_key is not None:
+                print(f"[SCHEDULER] Time slot changed: {prev_slot_key} → {slot_key}")
+                new_names = [s.get("name", "") for s in active_slot.get("streams", [])]
+                pipeline.remove_streams_not_in(new_names)
+                add_slot_streams(active_slot)
+            prev_slot_key = slot_key
 
-            if slot_key not in slot_indices: slot_indices[slot_key] = 0
-            idx = slot_indices[slot_key] % len(streams)
-            stream = streams[idx]
-            slot_indices[slot_key] = idx + 1
+            # Get next clip — non-blocking poll with animation
+            # NEVER block main thread > 30ms (prevents "NOT RESPONDING")
+            clip = pipeline.get_next_clip(timeout=0.01)
+            if clip is None:
+                # Show "preparing" screen while polling — keeps GUI responsive
+                poll_start = time.time()
+                while clip is None and time.time() - poll_start < 180:
+                    el = time.time() - poll_start
+                    frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
+                    for yr in range(WINDOW_H):
+                        v = int(15 + 10 * (yr / WINDOW_H))
+                        frame[yr, :] = (v, v + 5, v + 10)
 
-            stream_name = stream.get("name", f"Stream {idx+1}")
-            stream_url  = stream.get("url", "")
-            cycle_count += 1
-            
-            mgr = get_or_create_manager(stream_name, stream_url)
+                    from ui.animations import draw_globe
+                    gcx, gcy = WINDOW_W // 2, WINDOW_H // 2 - 40
+                    draw_globe(frame, gcx, gcy, 80, el * 0.8, min(1.0, el / 10.0))
 
-            quit_req = show_globe_transition(stream_name, transition_duration, "Connecting to stream", WINDOW_W, WINDOW_H, WINDOW_NAME, gui_enabled, web_server)
-            if quit_req: break
-                
-            clip_path = mgr.get_next_valid_clip(timeout=60) if mgr else None
-            if not clip_path: continue
+                    cv2.putText(frame, "Preparing next round...",
+                                (WINDOW_W // 2 - 130, WINDOW_H // 2 + 120),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
+                    stats = pipeline.get_stats()
+                    cv2.putText(frame,
+                                f"Ready: {stats['ready_queue']} | "
+                                f"YOLO: {stats['yolo']['current'] or 'idle'}",
+                                (WINDOW_W // 2 - 150, WINDOW_H // 2 + 160),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 150, 200), 1, cv2.LINE_AA)
 
-            next_name, next_url = peek_next_stream()
-            if next_name and next_url:
-                get_or_create_manager(next_name, next_url)
+                    web_server.update_frame(frame)
+                    if debug_gui:
+                        key = update_debug_window(pipeline)
+                    else:
+                        key = cv2.waitKey(30) & 0xFF
+                    if key == ord('q'):
+                        raise KeyboardInterrupt
 
-            cfg_path = stream_config_path(stream_name)
-            result = run_counting_on_clip(clip_path, model, stream_name, count_duration, config_file=cfg_path, imgsz=imgsz, skip_frames=skip_frames)
+                    # Non-blocking poll (never blocks > 10ms)
+                    clip = pipeline.get_next_clip(timeout=0.01)
 
-            try:
-                mgr.mark_clip_done(clip_path)
-            except Exception:
-                pass
+                if clip is None:
+                    print("[SCHEDULER] No clip ready after 180s, retrying...")
+                    continue
 
-            if result is None: break
+            # ── PREPARE ROUND ──
+            round_counter += 1
+            rd = prepare_round(clip, round_counter, history)
 
-            quit_req = show_results_screen(stream_name, result, 5, WINDOW_W, WINDOW_H, WINDOW_NAME, gui_enabled, web_server)
-            if quit_req: break
+            print(f"\n{'─' * 50}")
+            print(f"  ROUND #{round_counter}")
+            print(f"  Stream : {clip.stream_name}")
+            print(f"  Result : {rd.result} vehicles (pre-counted)")
+            print(f"  Hash   : {rd.commitment_hash[:24]}...")
+            print(f"  Under  : < {rd.under_threshold}  |  "
+                  f"Range : {rd.under_threshold}-{rd.over_threshold}  |  "
+                  f"Over : > {rd.over_threshold}")
+            print(f"  Odds   : Under {rd.odds.get('under', '?')}x | "
+                  f"Range {rd.odds.get('range', '?')}x | "
+                  f"Over {rd.odds.get('over', '?')}x")
+            print(f"{'─' * 50}")
+
+            # ── PHASE 1: BETTING (15 sec) ──
+            if show_betting_phase(rd, BETTING_DURATION, pipeline):
+                break
+
+            # ── PHASE 2+3: COUNTING (35 sec) + WAITING (6 sec) ──
+            if play_round_clip(rd, pipeline):
+                break
+
+            # ── FINALIZE ──
+            finalize_round(rd, history)
+            pipeline.mark_clip_done(clip)
+
+            web_server.update_verification({
+                "round_id": rd.round_id,
+                "server_seed": rd.server_seed,
+                "result": rd.result,
+                "under_threshold": rd.under_threshold,
+                "over_threshold": rd.over_threshold,
+                "commitment_hash": rd.commitment_hash,
+            })
+
+            print(f"  Round #{round_counter} complete | Result: {rd.result} | "
+                  f"Ready: {pipeline.ready_count()} clips")
 
     except KeyboardInterrupt:
-        pass
+        print("\n[SCHEDULER] Interrupted by user")
     finally:
-        cleanup_managers()
-        if gui_enabled: cv2.destroyAllWindows()
-        try: shutil.rmtree(DEFAULT_CLIP_DIR, ignore_errors=True)
-        except: pass
+        pipeline.cleanup()
+        if debug_gui:
+            cv2.destroyAllWindows()
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG)
-    parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--imgsz", type=int, default=1600)
-    parser.add_argument("--skip-frames", type=int, default=1)
-    parser.add_argument("--test", action="store_true")
-    parser.add_argument("--no-gui", action="store_true")
-    parser.add_argument("--web-port", type=int, default=5000)
+    parser = argparse.ArgumentParser(description="CCTV Casino Game Scheduler")
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG,
+                        help="Path to streams_config.json")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
+                        help="YOLO model file")
+    parser.add_argument("--imgsz", type=int, default=1600,
+                        help="YOLO input image size")
+    parser.add_argument("--gui", action="store_true",
+                        help="Development mode: debug GUI window showing live "
+                             "YOLO processing + mouse line/ROI drawing")
+    parser.add_argument("--web-port", type=int, default=5000,
+                        help="Flask web server port")
+    parser.add_argument("--test", action="store_true",
+                        help="Validate config and exit")
     args = parser.parse_args()
 
     if args.test:
-        print("[TEST] Run visual/unit test logic...")
+        slots, cd, td = load_streams_config(args.config)
+        print(f"[TEST] Config OK: {len(slots)} time slots, "
+              f"count_duration={cd}, transition_duration={td}")
+        total_streams = sum(len(s.get("streams", [])) for s in slots)
+        print(f"[TEST] Total streams: {total_streams}")
         return
-    run_scheduler(args.config, args.model, args.imgsz, args.skip_frames, args.no_gui, args.web_port)
+
+    run_scheduler(args.config, args.model, args.imgsz, args.gui, args.web_port)
+
 
 if __name__ == "__main__":
     main()

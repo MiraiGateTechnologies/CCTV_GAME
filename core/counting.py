@@ -1,6 +1,10 @@
 """
 Core counting logic for CCTV Vehicle Counter using YOLO and OpenCV geometry.
 Separated from the UI/rendering logic.
+
+Includes:
+  - VehicleCounter: real-time or frame-by-frame counting class
+  - offline_count(): batch process a clip file and return result + per-frame detections
 """
 import time
 import math
@@ -9,6 +13,9 @@ import cv2
 from collections import defaultdict
 from core.geometry_utils import is_intersect, point_in_polygon
 from core.config_manager import load_line_config, save_line_config
+
+# Vehicle classes for YOLO detection (used in both online and offline modes)
+VEHICLE_CLASSES = {2: "Car", 5: "Bus", 7: "Truck"}
 
 class VehicleCounter:
     def __init__(self, config_file="line_config.json", flash_frames=4, count_interval=35, wait_interval=15):
@@ -222,11 +229,10 @@ class VehicleCounter:
                         box_half_flash = max(x2-x1, y2-y1) // 2 + 6
                         self.flash_positions[track_id] = (cx, cy, box_half_flash)
 
-            # ROI Mode
+            # ROI Mode — count on EXIT (vehicle leaves ROI → counted)
             elif self.mode == "roi" and self.roi_poly:
                 inside = point_in_polygon((cx, cy), self.roi_poly)
-                
-                # Check for ID switches for any new track_id
+
                 if track_id not in self.inside_roi_ids and track_id not in self.interval_counted_ids:
                     dup_id = self._is_duplicate_footprint(x1, y1, x2, y2)
                     if dup_id is not None:
@@ -239,7 +245,6 @@ class VehicleCounter:
                     seen_in_roi_this_frame.add(track_id)
                     self.inside_roi_ids.add(track_id)
                 else:
-                    # NOT inside ROI (Exit Condition)
                     if track_id in self.inside_roi_ids and track_id not in self.interval_counted_ids:
                         if counting_active and not self._is_duplicate_crossing(cx, cy):
                             self.interval_total += 1
@@ -250,14 +255,282 @@ class VehicleCounter:
                             self.flash_positions[track_id] = (cx, cy, box_half_flash)
 
             self.prev_centers[track_id] = (cx, cy)
-            
-            # Update spatial footprint registry for all tracked/counted vehicles continuously
+
             if track_id in self.inside_roi_ids or track_id in self.interval_counted_ids:
                 self.roi_track_boxes[track_id] = (x1, y1, x2, y2, time.time())
-                
+
             if track_id not in self.interval_counted_ids:
                 dots_to_draw.add((cx, cy))
 
         # Remove IDs that left ROI
         self.inside_roi_ids = self.inside_roi_ids.intersection(seen_in_roi_this_frame)
         return dots_to_draw
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  OFFLINE COUNTING — Batch process a clip, return result + detections
+# ═══════════════════════════════════════════════════════════════════
+
+def offline_count(clip_path: str, line_config_file: str, model,
+                  count_duration: float = 35.0, confidence: float = 0.10,
+                  imgsz: int = 1600, min_box_area: int = 0,
+                  debug_callback=None) -> dict | None:
+    """
+    Run YOLO + VehicleCounter on a pre-recorded clip file (offline/batch mode).
+
+    Same counting algorithm as real-time, but:
+      - Processes ALL frames (no skip_frames)
+      - No time pressure — takes as long as needed
+      - Stores per-frame detection data for playback overlay
+      - Only counts within first `count_duration` seconds
+
+    Args:
+        clip_path:        Path to MP4 clip file
+        line_config_file: Path to per-stream line/ROI config JSON
+        model:            Loaded YOLO model instance
+        count_duration:   Seconds to count (default 35, clip can be longer)
+        confidence:       YOLO confidence threshold
+        imgsz:            YOLO input resolution
+        min_box_area:     Minimum bounding box area filter
+        debug_callback:   Optional callback for --gui debug visualization.
+                          Called per frame: debug_callback(annotated_frame, frame_no,
+                          counter, results, counting_active).
+                          Adds ~3ms overhead per frame — negligible vs YOLO.
+
+    Returns:
+        {
+            "result": 7,                    # total vehicle count
+            "detections": {                  # per-frame detection boxes
+                0: [{"track_id": 3, "bbox": [100,200,160,250]}],
+                1: [{"track_id": 3, "bbox": [102,200,162,250]}],
+                ...
+            },
+            "counting_events": [             # moments when count incremented
+                {"frame": 115, "ts": 4.6, "count_at": 1},
+                {"frame": 198, "ts": 7.9, "count_at": 2},
+                ...
+            ],
+            "total_frames_processed": 875,
+            "clip_fps": 25.0
+        }
+        Returns None on failure.
+    """
+    cap = cv2.VideoCapture(clip_path)
+    if not cap.isOpened():
+        print(f"[OFFLINE_COUNT] ERROR: Cannot open clip: {clip_path}")
+        return None
+
+    clip_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    max_count_frames = int(count_duration * clip_fps)
+
+    # Create counter with the stream's line config
+    counter = VehicleCounter(config_file=line_config_file)
+    counter.phase = "COUNT"
+    counter.phase_start = time.time()
+
+    # Read first frame to set frame size and load line config
+    ret, first_frame = cap.read()
+    if not ret:
+        cap.release()
+        return None
+    counter.set_frame_size(first_frame.shape[0], first_frame.shape[1])
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # reset to frame 0
+
+    all_detections = {}
+    counting_events = []
+    frame_no = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Only count within count_duration (first 35 sec)
+        counting_active = frame_no < max_count_frames
+
+        # Hot-reload line config every ~1 sec (30 frames) so --gui line
+        # drawing changes show LIVE on the current video being processed
+        if frame_no % 30 == 0:
+            counter.set_frame_size(first_frame.shape[0], first_frame.shape[1])
+
+        # Run YOLO track on EVERY frame (no skip — offline has no time pressure)
+        results = model.track(
+            frame, persist=True, classes=list(VEHICLE_CLASSES.keys()),
+            conf=confidence, imgsz=imgsz, half=True, verbose=False,
+            device=0, tracker="bytetrack.yaml", iou=0.5,
+        )
+
+        # Get count before processing
+        prev_count = counter.interval_total
+
+        # Process detections (same core logic as real-time)
+        counter.process_detections(
+            results, counting_active, VEHICLE_CLASSES, min_box_area, confidence
+        )
+
+        new_count = counter.interval_total
+
+        # Store per-frame detection boxes for playback overlay
+        frame_dets = []
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+            for box, tid in zip(boxes, track_ids):
+                x1, y1, x2, y2 = box.astype(int).tolist()
+                frame_dets.append({
+                    "track_id": int(tid),
+                    "bbox": [x1, y1, x2, y2],
+                })
+
+        if frame_dets:
+            all_detections[frame_no] = frame_dets
+
+        # Record counting event if count increased
+        if new_count > prev_count and counting_active:
+            counting_events.append({
+                "frame": frame_no,
+                "ts": round(frame_no / clip_fps, 2),
+                "count_at": new_count,
+            })
+
+        # Store flash positions for this frame (for playback bracket animation)
+        # Only mark "crossed" for vehicles that JUST crossed (flash_timers > 0)
+        if counter.flash_positions:
+            if frame_no not in all_detections:
+                all_detections[frame_no] = []
+            for tid, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
+                t = counter.flash_timers.get(tid, 0)
+                if t > 0:
+                    for det in all_detections.get(frame_no, []):
+                        if det["track_id"] == tid:
+                            det["crossed"] = True
+                            det["flash_cx"] = fcx
+                            det["flash_cy"] = fcy
+                            det["flash_half"] = fbox_half
+
+        # Debug visualization callback (--gui mode)
+        if debug_callback is not None:
+            debug_callback(frame, frame_no, counter, results, counting_active)
+
+        # Decrement flash_timers and clean up — same as old draw_glow_bracket() did
+        # Without this, flash_positions accumulates forever and blinks break
+        for tid in list(counter.flash_timers.keys()):
+            counter.flash_timers[tid] -= 1
+            if counter.flash_timers[tid] <= 0:
+                counter.flash_timers.pop(tid, None)
+                counter.flash_positions.pop(tid, None)
+
+        frame_no += 1
+
+    cap.release()
+
+    return {
+        "result": counter.interval_total,
+        "detections": all_detections,
+        "counting_events": counting_events,
+        "total_frames_processed": frame_no,
+        "clip_fps": clip_fps,
+    }
+
+
+def render_debug_frame(frame, counter, results, counting_active,
+                       frame_no, clip_fps, stream_name=""):
+    """
+    Render a debug-annotated frame for the --gui development window.
+    Shows exactly what the background YOLO pipeline is doing:
+    vehicle boxes, tracking dots, counting line/ROI, count overlay.
+
+    Same visual as production playback — developer sees what players will see.
+    Adds ~2-3ms per frame overhead (negligible vs YOLO 50-80ms).
+    """
+    import numpy as np
+
+    h, w = frame.shape[:2]
+
+    # Draw counting line or ROI
+    if counter.mode == "line" and counter.line and len(counter.line) == 2:
+        pt1, pt2 = counter.line
+        cv2.line(frame, pt1, pt2, (0, 255, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+    elif counter.mode == "roi" and counter.roi_poly and len(counter.roi_poly) >= 3:
+        import numpy as _np
+        pts = _np.array(counter.roi_poly, dtype=_np.int32)
+        cv2.polylines(frame, [pts], isClosed=True, color=(0, 200, 255),
+                      thickness=2, lineType=cv2.LINE_AA)
+        for i, pt in enumerate(counter.roi_poly):
+            cv2.circle(frame, pt, 5, (0, 200, 255), -1)
+
+    # White tracking dots — same as old code (bottom-center of box, uncounted only)
+    if results[0].boxes is not None and results[0].boxes.id is not None:
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+        track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+
+        for box, tid in zip(boxes, track_ids):
+            x1, y1, x2, y2 = box.astype(int)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            if tid not in counter.interval_counted_ids:
+                cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
+
+    # Green blink brackets — exact same as old draw_glow_bracket()
+    for tid, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
+        t = counter.flash_timers.get(tid, 0)
+        if t > 0:
+            import math as _math
+            total = counter.flash_frames
+            progress = (total - t) / total
+            alpha = abs(_math.sin(_math.pi * progress))
+            bc = (0, 255, 0)  # bracket_color
+            color = (int(bc[2] * alpha), int(bc[1] * alpha), int(bc[0] * alpha))
+            size = 28
+            th = 3
+            bx1, by1 = fcx - fbox_half, fcy - fbox_half
+            bx2, by2 = fcx + fbox_half, fcy + fbox_half
+
+            # Animated green fill (same as old)
+            hw = int(fbox_half * progress)
+            hh = int(fbox_half * progress)
+            overlay_f = frame.copy()
+            cv2.rectangle(overlay_f, (fcx - hw, fcy - hh),
+                          (fcx + hw, fcy + hh), (0, 180, 0), -1)
+            fill_alpha = 0.25 * alpha
+            cv2.addWeighted(overlay_f, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+            # Corner brackets (same as old)
+            cv2.line(frame, (bx1, by1), (bx1 + size, by1), color, th)
+            cv2.line(frame, (bx1, by1), (bx1, by1 + size), color, th)
+            cv2.line(frame, (bx2, by1), (bx2 - size, by1), color, th)
+            cv2.line(frame, (bx2, by1), (bx2, by1 + size), color, th)
+            cv2.line(frame, (bx1, by2), (bx1 + size, by2), color, th)
+            cv2.line(frame, (bx1, by2), (bx1, by2 - size), color, th)
+            cv2.line(frame, (bx2, by2), (bx2 - size, by2), color, th)
+            cv2.line(frame, (bx2, by2), (bx2, by2 - size), color, th)
+
+    # Dashboard overlay
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (10, 10), (380, 160), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+    phase_label = "COUNTING" if counting_active else "BEYOND 35s (not counted)"
+    phase_color = (0, 255, 100) if counting_active else (80, 80, 255)
+    ts_sec = round(frame_no / (clip_fps or 25.0), 1)
+
+    y = 30
+    cv2.putText(frame, f"DEBUG: {stream_name}", (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
+    y += 25
+    cv2.putText(frame, f"COUNT: {counter.interval_total}", (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+    y += 25
+    mode_label = "LINE" if counter.mode == "line" else "ROI"
+    cv2.putText(frame, f"Mode: {mode_label} | Frame: {frame_no} | {ts_sec}s", (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+    y += 22
+    cv2.putText(frame, f"Phase: {phase_label}", (20, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, phase_color, 1, cv2.LINE_AA)
+
+    # Controls hint at bottom
+    cv2.putText(frame, "LDrag=Line | RClick x4=ROI | S=Save | L=LineMode | Q=Quit",
+                (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (140, 140, 140), 1, cv2.LINE_AA)
+
+    return frame

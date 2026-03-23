@@ -48,8 +48,23 @@ from datetime import datetime
 VIDEOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videos")
 
 
-def get_stream_url(youtube_url: str) -> str:
-    """Resolve a YouTube URL to a direct playable stream URL via yt-dlp."""
+# URL cache — avoid re-resolving YouTube URLs within refresh window
+_url_cache: dict[str, tuple[str, float]] = {}  # youtube_url -> (resolved_url, timestamp)
+URL_CACHE_TTL = 2 * 3600  # Refresh YouTube URLs every 2 hours
+
+
+def get_stream_url(youtube_url: str, use_cache: bool = True) -> str:
+    """Resolve a YouTube URL to a direct playable stream URL via yt-dlp.
+
+    Caches resolved URLs for 2 hours to avoid excessive yt-dlp calls.
+    """
+    # Check cache first
+    if use_cache and youtube_url in _url_cache:
+        cached_url, cached_time = _url_cache[youtube_url]
+        import time as _time
+        if _time.time() - cached_time < URL_CACHE_TTL:
+            return cached_url
+
     print("[INFO] YouTube stream URL fetch kar raha hoon...")
     try:
         cmd = [sys.executable, "-m", "yt_dlp", "--get-url", "-f", "best[ext=mp4]/best", "--no-playlist", youtube_url]
@@ -57,6 +72,8 @@ def get_stream_url(youtube_url: str) -> str:
         url = result.stdout.strip().split('\n')[0]
         if url:
             print("[OK] Stream URL mila!")
+            import time as _time
+            _url_cache[youtube_url] = (url, _time.time())
             return url
         print(f"[ERROR] URL nahi mila: {result.stderr}")
         sys.exit(1)
@@ -66,6 +83,21 @@ def get_stream_url(youtube_url: str) -> str:
     except subprocess.TimeoutExpired:
         print("[ERROR] Timeout!")
         sys.exit(1)
+
+
+def get_stream_url_safe(youtube_url: str) -> str | None:
+    """Like get_stream_url but returns None instead of sys.exit on failure."""
+    try:
+        cmd = [sys.executable, "-m", "yt_dlp", "--get-url", "-f", "best[ext=mp4]/best", "--no-playlist", youtube_url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        url = result.stdout.strip().split('\n')[0]
+        if url:
+            import time as _time
+            _url_cache[youtube_url] = (url, _time.time())
+            return url
+        return None
+    except Exception:
+        return None
 
 
 def extract_clip(stream_url, duration_secs, output_path):
