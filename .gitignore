@@ -29,7 +29,7 @@ Thumbs.db
 livekit_server/
 
 # Runtime generated data
-round_history.json
+
 
 # Temporary files
 *.tmp
