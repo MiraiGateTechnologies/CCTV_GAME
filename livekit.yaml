@@ -1,0 +1,11 @@
+keys:
+  devkey: "cctv-game-secret-key-32chars-min!"
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+  port_range_start: 50000
+  port_range_end: 60000

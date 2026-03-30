@@ -1,26 +1,29 @@
 """
 ================================================================
-  STREAM MANAGER — Parallel Download + Single YOLO Pipeline
+  STREAM MANAGER — Sequential Download + Single YOLO Pipeline
 ================================================================
 
 Architecture (thread-safe, GPU-safe):
 
-  StreamDownloader (per stream, parallel, NO GPU):
-    Download 41s clip → quality check → push to download_queue
+  SequentialDownloader (1 thread, round-robin ALL streams, NO GPU):
+    Stream A → resolve + download → quality check → push to download_queue
+    Stream B → resolve + download → quality check → push to download_queue
+    Stream C → ... (round-robin, one at a time)
+    Queue full (3 clips)? → sleep until YOLO consumes
 
   YOLOWorker (SINGLE instance, OWNS GPU):
     Pick from download_queue → offline_count() → validate count
     → push approved clips to ready_queue
 
   Pipeline (coordinator):
-    Manages all downloaders + single worker
-    Exposes ready_queue to scheduler (fastest stream wins)
+    Manages downloader + YOLO worker
+    Exposes ready_queue to scheduler
 
-Benefits over old ClipManager-per-stream approach:
-  - Parallel downloads: all streams download simultaneously
+Benefits:
+  - 1 download at a time: no YouTube 429 spam, no race conditions
+  - Round-robin: every stream gets equal turn
   - Single YOLO thread: no ByteTrack tracker corruption
-  - Shared ready queue: no wasting time on low-traffic streams
-  - 4x faster cold start
+  - Queue target = 3: downloads match YOLO consumption rate
 """
 
 import os
@@ -38,12 +41,13 @@ import cv2
 # ─────────────────────────────────────────────
 CLIP_DURATION = 41            # Total clip length (35 counting + 6 waiting)
 COUNT_DURATION = 35           # Only count vehicles in first 35 seconds
-MIN_VEHICLE_COUNT = 1         # Minimum vehicles for a clip to be approved
+MIN_VEHICLE_COUNT = 5         # Minimum vehicles for a clip to be approved
 DOWNLOAD_TIMEOUT = 90         # Max seconds for ffmpeg download
-READY_QUEUE_MAX = 4           # Max pre-processed clips ready for rounds
-DOWNLOAD_QUEUE_MAX = 8        # Max downloaded-but-unprocessed clips waiting for YOLO
+READY_QUEUE_MAX = 10           # Max pre-processed clips ready for rounds
+DOWNLOAD_QUEUE_MAX = 5        # Max downloaded-but-unprocessed clips waiting for YOLO
+DOWNLOAD_QUEUE_TARGET = 3     # Keep exactly 3 clips in download queue
 MAX_PENDING_PER_STREAM = 2    # Max unprocessed clips per stream (throttle fast streams)
-YT_URL_CACHE_TTL = 2 * 3600  # Refresh YouTube URLs every 2 hours
+YT_URL_CACHE_TTL = 4 * 3600  # Refresh YouTube URLs every 4 hours (was 2, reduced 429s)
 
 
 # ─────────────────────────────────────────────
@@ -80,98 +84,127 @@ class PreProcessedClip:
 
 
 # ─────────────────────────────────────────────
-#  STREAM DOWNLOADER — One per stream, parallel
+#  SEQUENTIAL DOWNLOADER — Single thread, round-robin all streams
 # ─────────────────────────────────────────────
 
-class StreamDownloader:
+class SequentialDownloader:
     """
-    Downloads clips from a single live CCTV stream in its own thread.
-    No GPU, no YOLO — just ffmpeg download + quality check.
-    Pushes DownloadedClip objects to a shared download_queue.
+    Downloads clips from ALL streams using a SINGLE thread in round-robin order.
+    One download at a time — no race conditions, no YouTube 429 spam.
+
+    Flow:
+      Stream 7 → resolve + download → push to queue
+      Stream 16 → resolve + download → push to queue
+      Stream 17 → resolve + download → push to queue
+      (queue full? sleep until YOLO consumes)
+      Stream 19 → ...
+      ...back to Stream 7 (round-robin)
     """
 
-    def __init__(self, stream_url: str, stream_name: str,
-                 line_config_file: str, download_queue: queue.Queue,
-                 imgsz: int = 1600, confidence: float = 0.10):
-        self.stream_url = stream_url
-        self.stream_name = stream_name
-        self.line_config_file = line_config_file
+    def __init__(self, download_queue: queue.Queue):
         self.download_queue = download_queue
-        self.imgsz = imgsz
-        self.confidence = confidence
+        self.streams: list[dict] = []   # [{name, url, config, imgsz, conf}, ...]
         self.is_running = True
 
-        # YouTube URL cache
-        self._resolved_url: str | None = None
-        self._resolved_time: float = 0.0
+        # Per-stream YouTube URL cache: {youtube_url: (resolved_url, timestamp)}
+        self._url_cache: dict[str, tuple[str, float]] = {}
+        self._yt_fail_count = 0
 
-        # Throttle: track how many of OUR clips are pending in download_queue
-        self.pending_count = 0
-        self._pending_lock = threading.Lock()
+        # Per-stream failure tracking: {stream_name: consecutive_failures}
+        self._failures: dict[str, int] = {}
 
         # Stats
         self.clips_downloaded = 0
         self.clips_quality_rejected = 0
         self.download_failures = 0
+        self.clip_counter = 0
 
         # Temp directory
-        self.temp_dir = tempfile.mkdtemp(prefix=f"cctv_dl_{stream_name.replace(' ', '_')}_")
+        self.temp_dir = tempfile.mkdtemp(prefix="cctv_dl_seq_")
 
-        # Download thread
+        # Single download thread
         self.thread = threading.Thread(
-            target=self._download_loop, daemon=True,
-            name=f"DL-{stream_name}",
+            target=self._download_loop, daemon=True, name="DL-Sequential",
         )
         self.thread.start()
 
+    def add_stream(self, name: str, url: str, config_path: str,
+                   imgsz: int = 1600, confidence: float = 0.10):
+        """Add a stream to the round-robin rotation."""
+        # Don't add duplicates
+        for s in self.streams:
+            if s["name"] == name:
+                return
+        self.streams.append({
+            "name": name, "url": url, "config": config_path,
+            "imgsz": imgsz, "conf": confidence,
+        })
+        self._failures[name] = 0
+
+    def remove_stream(self, name: str):
+        """Remove a stream from the rotation."""
+        self.streams = [s for s in self.streams if s["name"] != name]
+        self._failures.pop(name, None)
+
     # ── URL Resolution ──
 
-    def _is_youtube(self) -> bool:
-        return "youtube.com" in self.stream_url or "youtu.be" in self.stream_url
+    def _is_youtube(self, url: str) -> bool:
+        return "youtube.com" in url or "youtu.be" in url
 
-    def _resolve_download_url(self) -> str | None:
-        """YouTube → yt-dlp resolve (cached 2hr). HLS/RTSP → direct URL."""
-        if not self._is_youtube():
-            return self.stream_url
+    def _resolve_url(self, stream_name: str, stream_url: str) -> str | None:
+        """YouTube → yt-dlp resolve (cached). HLS/RTSP → direct URL."""
+        if not self._is_youtube(stream_url):
+            return stream_url
 
-        if self._resolved_url and (time.time() - self._resolved_time < YT_URL_CACHE_TTL):
-            return self._resolved_url
+        # Check cache
+        cached = self._url_cache.get(stream_url)
+        if cached and (time.time() - cached[1] < YT_URL_CACHE_TTL):
+            return cached[0]
 
         ts = time.strftime("%H:%M:%S")
-        print(f"[{ts}] [RESOLVE] {self.stream_name}: Resolving YouTube URL...")
+        print(f"[{ts}] [RESOLVE] {stream_name}: Resolving YouTube URL...")
         try:
             cmd = [
                 sys.executable, "-m", "yt_dlp",
                 "--get-url",
                 "-f", "best[ext=mp4][height<=720]/best[ext=mp4]/best",
                 "--no-playlist",
-                self.stream_url,
+                stream_url,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             url = result.stdout.strip().split('\n')[0]
             if url and url.startswith("http"):
-                self._resolved_url = url
-                self._resolved_time = time.time()
-                print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: OK")
+                self._url_cache[stream_url] = (url, time.time())
+                self._yt_fail_count = 0
+                print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: OK")
                 return url
+
             err = result.stderr.strip()[:200]
-            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Failed — {err}")
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Failed — {err}")
+            if "429" in err or "Too Many Requests" in err:
+                backoff = min(300, 10 * (2 ** self._yt_fail_count))
+                self._yt_fail_count += 1
+                print(f"[RESOLVE] {stream_name}: YouTube 429 — backoff {backoff}s")
+                time.sleep(backoff)
+            else:
+                self._yt_fail_count = 0
             return None
         except subprocess.TimeoutExpired:
-            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Timed out (30s)")
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Timed out (30s)")
             return None
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {self.stream_name}: Error — {e}")
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Error — {e}")
             return None
 
     # ── Download ──
 
-    def _download_clip(self, output_path: str) -> bool:
-        """Download clip via ffmpeg. No re-encoding (-c copy)."""
+    def _download_clip(self, stream_name: str, stream_url: str,
+                       output_path: str) -> bool:
+        """Resolve URL + download clip via ffmpeg. No re-encoding (-c copy)."""
         ts = time.strftime("%H:%M:%S")
-        print(f"[{ts}] [DL] {self.stream_name}: Downloading {CLIP_DURATION}s clip...")
+        print(f"[{ts}] [DL] {stream_name}: Downloading {CLIP_DURATION}s clip...")
 
-        download_url = self._resolve_download_url()
+        download_url = self._resolve_url(stream_name, stream_url)
         if not download_url:
             return False
 
@@ -196,18 +229,18 @@ class StreamDownloader:
             )
             if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+                print(f"[{time.strftime('%H:%M:%S')}] [DL] {stream_name}: "
                       f"Ready ({size_mb:.1f} MB)")
                 return True
             else:
                 err_msg = result.stderr.strip()[:300] if result.stderr else "unknown"
-                print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+                print(f"[{time.strftime('%H:%M:%S')}] [DL] {stream_name}: "
                       f"Failed — {err_msg}")
-                if self._is_youtube():
-                    self._resolved_url = None
+                if self._is_youtube(stream_url):
+                    self._url_cache.pop(stream_url, None)
                 return False
         except subprocess.TimeoutExpired:
-            print(f"[{time.strftime('%H:%M:%S')}] [DL] {self.stream_name}: "
+            print(f"[{time.strftime('%H:%M:%S')}] [DL] {stream_name}: "
                   f"Timed out ({DOWNLOAD_TIMEOUT}s)")
             self._safe_delete(output_path)
             return False
@@ -222,8 +255,12 @@ class StreamDownloader:
         cap = cv2.VideoCapture(clip_path)
         if not cap.isOpened():
             return False, "Cannot open clip"
-
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        duration = total_frames / fps
+        if duration < CLIP_DURATION - 3:
+            cap.release()
+            return False, f"Too short ({duration:.1f}s < {CLIP_DURATION}s)"
         sample_points = [int(total_frames * p) for p in [0.1, 0.3, 0.5, 0.7]]
 
         for pos in sample_points:
@@ -245,66 +282,65 @@ class StreamDownloader:
         cap.release()
         return True, "OK"
 
-    # ── Main Download Loop ──
+    # ── Main Download Loop (SINGLE thread, round-robin) ──
 
     def _download_loop(self):
-        clip_counter = 0
-        consecutive_failures = 0
+        index = 0
 
         while self.is_running:
-            # Throttle: don't pile up too many unprocessed clips
-            with self._pending_lock:
-                if self.pending_count >= MAX_PENDING_PER_STREAM:
-                    time.sleep(3)
-                    continue
-
-            # Back off on repeated failures
-            if consecutive_failures >= 5:
-                time.sleep(30)
-                consecutive_failures = 0
+            # No streams added yet → wait
+            if not self.streams:
+                time.sleep(1)
                 continue
 
-            clip_counter += 1
-            safe_name = self.stream_name.replace(' ', '_')
-            clip_path = os.path.join(self.temp_dir, f"{safe_name}_{clip_counter}.mp4")
-
-            # Download
-            if not self._download_clip(clip_path):
-                consecutive_failures += 1
-                self.download_failures += 1
+            # Queue full → wait for YOLO to consume
+            if self.download_queue.qsize() >= DOWNLOAD_QUEUE_TARGET:
                 time.sleep(5)
                 continue
 
-            consecutive_failures = 0
+            # Pick next stream (round-robin)
+            stream = self.streams[index % len(self.streams)]
+            index += 1
+            name = stream["name"]
+
+            # Skip streams with too many consecutive failures (try again next rotation)
+            if self._failures.get(name, 0) >= 5:
+                self._failures[name] = 0  # reset after skipping one rotation
+                time.sleep(2)
+                continue
+
+            # Download
+            self.clip_counter += 1
+            safe_name = name.replace(' ', '_')
+            clip_path = os.path.join(self.temp_dir, f"{safe_name}_{self.clip_counter}.mp4")
+
+            if not self._download_clip(name, stream["url"], clip_path):
+                self._failures[name] = self._failures.get(name, 0) + 1
+                self.download_failures += 1
+                time.sleep(3)
+                continue
+
+            # Reset failures on success
+            self._failures[name] = 0
             self.clips_downloaded += 1
 
             # Quality check
             quality_ok, reason = self._check_quality(clip_path)
             if not quality_ok:
-                print(f"[DL] {self.stream_name}: Quality rejected — {reason}")
+                print(f"[DL] {name}: Quality rejected — {reason}")
                 self._safe_delete(clip_path)
                 self.clips_quality_rejected += 1
                 continue
 
-            # Push to shared download queue for YOLO processing
+            # Push to download queue for YOLO processing
             dl_clip = DownloadedClip(
                 clip_path=clip_path,
-                stream_name=self.stream_name,
-                line_config_file=self.line_config_file,
-                imgsz=self.imgsz,
-                confidence=self.confidence,
+                stream_name=name,
+                line_config_file=stream["config"],
+                imgsz=stream["imgsz"],
+                confidence=stream["conf"],
             )
-
-            with self._pending_lock:
-                self.pending_count += 1
-
-            # Blocks if download_queue is full (backpressure)
             self.download_queue.put(dl_clip)
-
-    def clip_consumed(self):
-        """Called when YOLOWorker picks our clip from download_queue."""
-        with self._pending_lock:
-            self.pending_count = max(0, self.pending_count - 1)
 
     def _safe_delete(self, path: str):
         try:
@@ -346,9 +382,6 @@ class YOLOWorker:
         # Debug frame queue (--gui mode)
         self.debug_frame_queue = queue.Queue(maxsize=1) if debug_mode else None
 
-        # Downloader references (for clip_consumed callback)
-        self._downloaders: dict[str, StreamDownloader] = {}
-
         # Stats
         self.clips_processed = 0
         self.clips_approved = 0
@@ -358,12 +391,6 @@ class YOLOWorker:
             target=self._worker_loop, daemon=True, name="YOLOWorker",
         )
         self.thread.start()
-
-    def register_downloader(self, stream_name: str, downloader: StreamDownloader):
-        self._downloaders[stream_name] = downloader
-
-    def unregister_downloader(self, stream_name: str):
-        self._downloaders.pop(stream_name, None)
 
     def _make_debug_callback(self, stream_name: str):
         """Create debug callback that pushes annotated frames to debug queue."""
@@ -398,11 +425,6 @@ class YOLOWorker:
                 dl_clip = self.download_queue.get(timeout=5)
             except queue.Empty:
                 continue
-
-            # Notify the downloader that its clip was consumed
-            dl = self._downloaders.get(dl_clip.stream_name)
-            if dl:
-                dl.clip_consumed()
 
             # Update current state for debug GUI
             self.current_stream_name = dl_clip.stream_name
@@ -506,8 +528,11 @@ class Pipeline:
         self.download_queue = queue.Queue(maxsize=DOWNLOAD_QUEUE_MAX)
         self.ready_queue = queue.Queue(maxsize=READY_QUEUE_MAX)
 
-        # Downloaders (one per stream)
-        self.downloaders: dict[str, StreamDownloader] = {}
+        # Sequential downloader (single thread, round-robin all streams)
+        self.downloader = SequentialDownloader(download_queue=self.download_queue)
+
+        # Track stream names (for stats/display)
+        self.stream_names: list[str] = []
 
         # Single YOLO worker (owns the GPU)
         self.yolo_worker = YOLOWorker(
@@ -520,34 +545,26 @@ class Pipeline:
     def add_stream(self, stream_name: str, stream_url: str,
                    line_config_file: str, imgsz: int = 1600,
                    confidence: float = 0.10):
-        """Add a stream — starts downloading immediately in parallel."""
-        if stream_name in self.downloaders:
+        """Add a stream to the round-robin download rotation."""
+        if stream_name in self.stream_names:
             return
 
-        dl = StreamDownloader(
-            stream_url=stream_url,
-            stream_name=stream_name,
-            line_config_file=line_config_file,
-            download_queue=self.download_queue,
-            imgsz=imgsz,
-            confidence=confidence,
-        )
-        self.downloaders[stream_name] = dl
-        self.yolo_worker.register_downloader(stream_name, dl)
+        self.downloader.add_stream(stream_name, stream_url,
+                                   line_config_file, imgsz, confidence)
+        self.stream_names.append(stream_name)
 
         print(f"[PIPELINE] Added stream: {stream_name} "
-              f"(total: {len(self.downloaders)} downloaders)")
+              f"(total: {len(self.stream_names)} streams)")
 
     def remove_stream(self, stream_name: str):
-        """Stop and remove a stream's downloader."""
-        dl = self.downloaders.pop(stream_name, None)
-        if dl:
-            dl.cleanup()
-            self.yolo_worker.unregister_downloader(stream_name)
+        """Remove a stream from the download rotation."""
+        self.downloader.remove_stream(stream_name)
+        if stream_name in self.stream_names:
+            self.stream_names.remove(stream_name)
 
     def remove_streams_not_in(self, keep_names: list[str]):
         """Remove all streams NOT in the keep list (for time slot changes)."""
-        to_remove = [n for n in self.downloaders if n not in keep_names]
+        to_remove = [n for n in self.stream_names if n not in keep_names]
         for name in to_remove:
             self.remove_stream(name)
 
@@ -588,15 +605,14 @@ class Pipeline:
     # ── Stats ──
 
     def get_stats(self) -> dict:
-        dl_stats = {}
-        for name, dl in self.downloaders.items():
-            dl_stats[name] = {
+        dl = self.downloader
+        return {
+            "downloaders": {
+                "total_streams": len(self.stream_names),
                 "downloaded": dl.clips_downloaded,
                 "quality_rejected": dl.clips_quality_rejected,
-                "pending": dl.pending_count,
-            }
-        return {
-            "downloaders": dl_stats,
+                "failures": dl.download_failures,
+            },
             "yolo": {
                 "processed": self.yolo_worker.clips_processed,
                 "approved": self.yolo_worker.clips_approved,
@@ -611,9 +627,11 @@ class Pipeline:
         """One-line stats string for debug overlay."""
         s = self.get_stats()
         yolo = s["yolo"]
+        dl = s["downloaders"]
         parts = [f"YOLO:{yolo['current'] or 'idle'}",
                  f"Ready:{s['ready_queue']}/{READY_QUEUE_MAX}",
                  f"DL_Q:{s['download_queue']}",
+                 f"DL:{dl['downloaded']}",
                  f"OK:{yolo['approved']} Rej:{yolo['rejected']}"]
         return " | ".join(parts)
 
@@ -621,6 +639,5 @@ class Pipeline:
         """Stop everything and clean up temp files."""
         print("[PIPELINE] Cleaning up...")
         self.yolo_worker.cleanup()
-        for dl in self.downloaders.values():
-            dl.cleanup()
-        self.downloaders.clear()
+        self.downloader.cleanup()
+        self.stream_names.clear()

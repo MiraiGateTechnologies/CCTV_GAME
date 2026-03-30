@@ -23,6 +23,13 @@ Thumbs.db
 *.pt
 *.pth
 *.onnx
+*.engine
+
+# LiveKit server binary
+livekit_server/
+
+# Runtime generated data
+round_history.json
 
 # Temporary files
 *.tmp

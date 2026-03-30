@@ -15,7 +15,7 @@ from core.geometry_utils import is_intersect, point_in_polygon
 from core.config_manager import load_line_config, save_line_config
 
 # Vehicle classes for YOLO detection (used in both online and offline modes)
-VEHICLE_CLASSES = {2: "Car", 5: "Bus", 7: "Truck"}
+VEHICLE_CLASSES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
 
 class VehicleCounter:
     def __init__(self, config_file="line_config.json", flash_frames=4, count_interval=35, wait_interval=15):
@@ -84,13 +84,14 @@ class VehicleCounter:
                 self.config_mtime = mtime
                 data = load_line_config(self.config_file)
                 if data:
-                    if "line" in data:
-                        self.line = [(int(p[0]), int(p[1])) for p in data["line"]]
-                    if "roi_poly" in data and data["roi_poly"]:
+                    mode = data.get("mode", "line")
+                    if mode == "roi" and data.get("roi_poly"):
                         self.roi_poly = [(int(p[0]), int(p[1])) for p in data["roi_poly"]]
                         self.mode = "roi"
-                    if "mode" in data:
-                        self.mode = data["mode"]
+                    elif data.get("line"):
+                        self.line = [(int(p[0]), int(p[1])) for p in data["line"]]
+                        self.mode = "line"
+                        self.roi_poly = None
         except Exception:
             pass
 
@@ -195,15 +196,17 @@ class VehicleCounter:
             x1, y1, x2, y2 = box.astype(int)
             cx, cy = (x1+x2)//2, (y1+y2)//2
 
-            _EMA_ALPHA = 0.80
+            box_area = (x2 - x1) * (y2 - y1)
+            if box_area < min_box_area:
+                continue
+            
+            _EMA_ALPHA = 0.30 if box_area < 2000 else 0.45
             if track_id in self.prev_centers:
                 pcx, pcy = self.prev_centers[track_id]
                 cx = int(_EMA_ALPHA * cx + (1 - _EMA_ALPHA) * pcx)
                 cy = int(_EMA_ALPHA * cy + (1 - _EMA_ALPHA) * pcy)
 
-            box_area = (x2 - x1) * (y2 - y1)
-            if box_area < min_box_area:
-                continue
+
 
             history = self.track_history[track_id]
             history.append((cx, cy))
@@ -216,7 +219,7 @@ class VehicleCounter:
                     A, B = current_line
                     hist = self.track_history[track_id]
                     crossed = False
-                    for i in range(max(0, len(hist) - 10), len(hist) - 1):
+                    for i in range(max(0, len(hist) - 20), len(hist) - 1):
                         p1, p2 = hist[i], hist[i + 1]
                         if is_intersect(A, B, p1, p2):
                             crossed = True
@@ -315,7 +318,9 @@ def offline_count(clip_path: str, line_config_file: str, model,
         }
         Returns None on failure.
     """
-    cap = cv2.VideoCapture(clip_path)
+    cap = cv2.VideoCapture(clip_path, cv2.CAP_FFMPEG, [
+        cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY
+    ])
     if not cap.isOpened():
         print(f"[OFFLINE_COUNT] ERROR: Cannot open clip: {clip_path}")
         return None
@@ -348,31 +353,31 @@ def offline_count(clip_path: str, line_config_file: str, model,
         # Only count within count_duration (first 35 sec)
         counting_active = frame_no < max_count_frames
 
-        # Hot-reload line config every ~1 sec (30 frames) so --gui line
-        # drawing changes show LIVE on the current video being processed
-        if frame_no % 30 == 0:
+        # Hot-reload line config every ~1 sec (only during counting)
+        if counting_active and frame_no % 30 == 0:
             counter.set_frame_size(first_frame.shape[0], first_frame.shape[1])
 
-        # Run YOLO track on EVERY frame (no skip — offline has no time pressure)
-        results = model.track(
-            frame, persist=True, classes=list(VEHICLE_CLASSES.keys()),
-            conf=confidence, imgsz=imgsz, half=True, verbose=False,
-            device=0, tracker="bytetrack.yaml", iou=0.5,
-        )
-
-        # Get count before processing
+        # Capture count BEFORE processing to detect new crossings
         prev_count = counter.interval_total
 
-        # Process detections (same core logic as real-time)
-        counter.process_detections(
-            results, counting_active, VEHICLE_CLASSES, min_box_area, confidence
-        )
+        if counting_active:
+            # First 35s: full YOLO + tracking + counting
+            results = model.track(
+                frame, persist=True, classes=list(VEHICLE_CLASSES.keys()),
+                conf=confidence, imgsz=imgsz, half=True, verbose=False,
+                device=0, tracker="bytetrack.yaml", iou=0.35,
+            )
+            dots = counter.process_detections(results, counting_active, VEHICLE_CLASSES, min_box_area, confidence)
+        else:
+            # Last 6s: NO YOLO — raw frame only, count frozen
+            results = None
+            dots = set()
 
         new_count = counter.interval_total
 
         # Store per-frame detection boxes for playback overlay
         frame_dets = []
-        if results[0].boxes is not None and results[0].boxes.id is not None:
+        if results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy()
             track_ids = results[0].boxes.id.cpu().numpy().astype(int)
             for box, tid in zip(boxes, track_ids):
@@ -380,6 +385,7 @@ def offline_count(clip_path: str, line_config_file: str, model,
                 frame_dets.append({
                     "track_id": int(tid),
                     "bbox": [x1, y1, x2, y2],
+                    "counted": int(tid) in counter.interval_counted_ids,
                 })
 
         if frame_dets:
@@ -437,76 +443,56 @@ def render_debug_frame(frame, counter, results, counting_active,
                        frame_no, clip_fps, stream_name=""):
     """
     Render a debug-annotated frame for the --gui development window.
-    Shows exactly what the background YOLO pipeline is doing:
-    vehicle boxes, tracking dots, counting line/ROI, count overlay.
+    Shows exactly what the background YOLO pipeline is doing.
 
-    Same visual as production playback — developer sees what players will see.
+    Uses draw_tracking_overlay() — the SAME shared function used by playback mode.
+    This guarantees pixel-identical dots, brackets, and line/ROI rendering.
+    Only the dashboard is debug-specific (shows dev info instead of game info).
+
     Adds ~2-3ms per frame overhead (negligible vs YOLO 50-80ms).
     """
-    import numpy as np
+    from ui.renderer import draw_tracking_overlay
 
     h, w = frame.shape[:2]
 
-    # Draw counting line or ROI
-    if counter.mode == "line" and counter.line and len(counter.line) == 2:
-        pt1, pt2 = counter.line
-        cv2.line(frame, pt1, pt2, (0, 255, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-    elif counter.mode == "roi" and counter.roi_poly and len(counter.roi_poly) >= 3:
-        import numpy as _np
-        pts = _np.array(counter.roi_poly, dtype=_np.int32)
-        cv2.polylines(frame, [pts], isClosed=True, color=(0, 200, 255),
-                      thickness=2, lineType=cv2.LINE_AA)
-        for i, pt in enumerate(counter.roi_poly):
-            cv2.circle(frame, pt, 5, (0, 200, 255), -1)
+    # ── Build line_config from counter state ──
+    line_config = {
+        "mode": counter.mode,
+        "line": list(counter.line) if counter.line else None,
+        "roi_poly": list(counter.roi_poly) if counter.roi_poly else None,
+    }
 
-    # White tracking dots — same as old code (bottom-center of box, uncounted only)
-    if results[0].boxes is not None and results[0].boxes.id is not None:
-        boxes = results[0].boxes.xyxy.cpu().numpy()
+    # ── Build dots list (uncounted vehicles only — same as playback) ──
+    dots = []
+    # if results[0].boxes is not None and results[0].boxes.id is not None:
+    #     boxes = results[0].boxes.xyxy.cpu().numpy()
+    #     track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+    #     for box, tid in zip(boxes, track_ids):
+    #         if tid not in counter.interval_counted_ids:
+    #             x1, y1, x2, y2 = box.astype(int)
+    #             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    #             dots.append((cx, cy))
+    if results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
         track_ids = results[0].boxes.id.cpu().numpy().astype(int)
-
-        for box, tid in zip(boxes, track_ids):
-            x1, y1, x2, y2 = box.astype(int)
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        for tid in track_ids:
             if tid not in counter.interval_counted_ids:
-                cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
+                if tid in counter.prev_centers:
+                    cx, cy = counter.prev_centers[tid]      # ← EMA-smoothed!
+                    dots.append((cx, cy))
 
-    # Green blink brackets — exact same as old draw_glow_bracket()
+    # ── Build brackets list from counter flash state ──
+    brackets = []
     for tid, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
         t = counter.flash_timers.get(tid, 0)
         if t > 0:
-            import math as _math
             total = counter.flash_frames
             progress = (total - t) / total
-            alpha = abs(_math.sin(_math.pi * progress))
-            bc = (0, 255, 0)  # bracket_color
-            color = (int(bc[2] * alpha), int(bc[1] * alpha), int(bc[0] * alpha))
-            size = 28
-            th = 3
-            bx1, by1 = fcx - fbox_half, fcy - fbox_half
-            bx2, by2 = fcx + fbox_half, fcy + fbox_half
+            brackets.append((fcx, fcy, fbox_half, progress))
 
-            # Animated green fill (same as old)
-            hw = int(fbox_half * progress)
-            hh = int(fbox_half * progress)
-            overlay_f = frame.copy()
-            cv2.rectangle(overlay_f, (fcx - hw, fcy - hh),
-                          (fcx + hw, fcy + hh), (0, 180, 0), -1)
-            fill_alpha = 0.25 * alpha
-            cv2.addWeighted(overlay_f, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+    # ── Draw shared tracking overlay (identical to playback mode) ──
+    draw_tracking_overlay(frame, dots, brackets, line_config)
 
-            # Corner brackets (same as old)
-            cv2.line(frame, (bx1, by1), (bx1 + size, by1), color, th)
-            cv2.line(frame, (bx1, by1), (bx1, by1 + size), color, th)
-            cv2.line(frame, (bx2, by1), (bx2 - size, by1), color, th)
-            cv2.line(frame, (bx2, by1), (bx2, by1 + size), color, th)
-            cv2.line(frame, (bx1, by2), (bx1 + size, by2), color, th)
-            cv2.line(frame, (bx1, by2), (bx1, by2 - size), color, th)
-            cv2.line(frame, (bx2, by2), (bx2 - size, by2), color, th)
-            cv2.line(frame, (bx2, by2), (bx2, by2 - size), color, th)
-
-    # Dashboard overlay
+    # ── Debug-only dashboard (dev info — intentionally different from playback) ──
     overlay = frame.copy()
     cv2.rectangle(overlay, (10, 10), (380, 160), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)

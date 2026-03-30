@@ -36,14 +36,14 @@ import web_server
 # ─────────────────────────────────────────────
 CONFIG = {
     "model":             "yolo11m.pt",
-    "confidence":        0.10,          # Low = detect more (incl. far vehicles)
+    "confidence":        0.010,          # Low = detect more (incl. far vehicles)
     "min_box_area":      0,            # Far vehicles can be ~7x8=56px area
     "imgsz":             1600,          # KEY: higher res = far vehicles detected!
     "line_color":        (0, 255, 0),
     "roi_color":         (0, 200, 255),
     "bracket_color":     (0, 255, 0),
-    "bracket_size":      28,
-    "bracket_thickness": 3,
+    "bracket_size":      22,
+    "bracket_thickness": 1,
     "flash_frames":      4,
     "count_interval":    35,
     "wait_interval":     15,

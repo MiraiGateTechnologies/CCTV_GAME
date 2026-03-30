@@ -3,6 +3,8 @@ UI rendering functions for the CCTV Vehicle Counter.
 Extracts drawing logic (dashboard, glow brackets, lines) away from business logic.
 
 Includes:
+  - Shared tracking overlay (draw_tracking_overlay) — single source of truth
+    for BOTH debug mode and playback mode (dots, brackets, line/ROI)
   - Original real-time rendering (draw_dashboard, draw_glow_bracket, draw_zones)
   - Playback overlay rendering (draw_playback_overlay) for pre-processed clips
 """
@@ -10,6 +12,85 @@ import cv2
 import time
 import math
 import numpy as np
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SHARED TRACKING OVERLAY — Single source of truth for debug + playback
+# ═══════════════════════════════════════════════════════════════════
+
+def draw_tracking_overlay(frame, dots, brackets, line_config):
+    """
+    Single source of truth for ALL tracking visuals.
+    Used by BOTH debug mode (render_debug_frame in counting.py) and
+    playback mode (draw_playback_overlay below) to guarantee
+    pixel-identical rendering.
+
+    Any change here (dot size, color, bracket animation, line style)
+    automatically applies to both modes — no dual maintenance.
+
+    Args:
+        frame:       OpenCV frame (modified in-place)
+        dots:        list of (cx, cy) — white tracking dots (uncounted vehicles only)
+        brackets:    list of (cx, cy, half_size, progress)
+                     progress: 0.0→1.0 bracket animation progress
+        line_config: dict with 'mode', 'line', 'roi_poly' — counting zone config
+                     Accepts both list and tuple coordinate formats.
+    """
+    # ── 1. Draw counting line / ROI zone ──
+    if line_config:
+        mode = line_config.get("mode", "line")
+        line = line_config.get("line")
+        roi = line_config.get("roi_poly")
+
+        if mode == "line" and line and len(line) == 2:
+            pt1 = (int(line[0][0]), int(line[0][1]))
+            pt2 = (int(line[1][0]), int(line[1][1]))
+            cv2.line(frame, pt1, pt2, (0, 255, 0), 3, cv2.LINE_AA)
+            cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+
+        if mode == "roi" and roi and len(roi) >= 3:
+            pts = np.array([(int(p[0]), int(p[1])) for p in roi], dtype=np.int32)
+            cv2.polylines(frame, [pts], isClosed=True, color=(0, 200, 255),
+                          thickness=2, lineType=cv2.LINE_AA)
+            for pt in roi:
+                cv2.circle(frame, (int(pt[0]), int(pt[1])), 5, (0, 200, 255), -1)
+
+    # ── 2. White tracking dots (uncounted vehicles only) ──
+    for (cx, cy) in dots:
+        cv2.circle(frame, (int(cx), int(cy)), 4, (255, 255, 255), -1)
+
+    # ── 3. Green flash brackets (counted vehicle animation) ──
+    for item in brackets:
+        fcx, fcy, fhalf, progress = int(item[0]), int(item[1]), int(item[2]), item[3]
+        alpha = abs(math.sin(math.pi * progress))
+        if alpha < 0.05:
+            continue  # Skip nearly-invisible frame (prevents black bracket flash)
+        color = (0, int(255 * alpha), 0)
+        size = 28
+        th = 3
+        bx1, by1 = fcx - fhalf, fcy - fhalf
+        bx2, by2 = fcx + fhalf, fcy + fhalf
+
+        # Animated green fill
+        hw = int(fhalf * progress)
+        hh = int(fhalf * progress)
+        overlay_b = frame.copy()
+        cv2.rectangle(overlay_b, (fcx - hw, fcy - hh),
+                      (fcx + hw, fcy + hh), (0, 180, 0), -1)
+        fill_alpha = 0.25 * alpha
+        cv2.addWeighted(overlay_b, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+        # Corner brackets
+        cv2.line(frame, (bx1, by1), (bx1 + size, by1), color, th)
+        cv2.line(frame, (bx1, by1), (bx1, by1 + size), color, th)
+        cv2.line(frame, (bx2, by1), (bx2 - size, by1), color, th)
+        cv2.line(frame, (bx2, by1), (bx2, by1 + size), color, th)
+        cv2.line(frame, (bx1, by2), (bx1 + size, by2), color, th)
+        cv2.line(frame, (bx1, by2), (bx1, by2 - size), color, th)
+        cv2.line(frame, (bx2, by2), (bx2 - size, by2), color, th)
+        cv2.line(frame, (bx2, by2), (bx2, by2 - size), color, th)
+
 
 def draw_dashboard(frame, counter, counting_active, elapsed, count_interval, wait_interval):
     """Draw the data dashboard overlay."""
@@ -154,6 +235,7 @@ def draw_zones(frame, counter, line_color, roi_color):
 _playback_flash_timers = {}  # track_id -> remaining frames
 _playback_flash_positions = {}  # track_id -> (cx, cy, half_size)
 PLAYBACK_FLASH_FRAMES = 4  # match old draw_glow_bracket flash_frames=4
+_playback_ema_centers = {}  # {track_id: (cx, cy)} — EMA smoothed dots
 
 
 def draw_playback_overlay(frame, frame_no: int, current_count: int,
@@ -183,145 +265,97 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
 
     h, w = frame.shape[:2]
 
-    # ── Draw counting line from config ──
-    if line_config:
-        line = line_config.get("line")
-        mode = line_config.get("mode", "line")
-        roi = line_config.get("roi_poly")
-
-        if mode == "line" and line and len(line) == 2:
-            pt1 = tuple(int(x) for x in line[0])
-            pt2 = tuple(int(x) for x in line[1])
-            cv2.line(frame, pt1, pt2, (0, 255, 0), 3)
-
-        if mode == "roi" and roi and len(roi) >= 3:
-            pts = np.array(roi, dtype=np.int32)
-            cv2.polylines(frame, [pts], isClosed=True, color=(0, 200, 255),
-                          thickness=2, lineType=cv2.LINE_AA)
-
-    # ── White tracking dots on vehicles (shows AI is tracking) ──
+    # ── Build dots list (uncounted vehicles only — same filter as debug mode) ──
+    dots = []
     for det in detections:
         bbox = det.get("bbox", [0, 0, 0, 0])
         x1, y1, x2, y2 = bbox
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
+        tid = det.get("track_id", 0)
+
+        # EMA smoothing — IDENTICAL to counting.py:203-207
+        # Uses box_area to determine alpha (same formula as process_detections)
+        box_area = (x2 - x1) * (y2 - y1)
+        ema_alpha = 0.30 if box_area < 2000 else 0.45
+
+        if tid in _playback_ema_centers:
+            pcx, pcy = _playback_ema_centers[tid]
+            cx = int(ema_alpha * cx + (1 - ema_alpha) * pcx)
+            cy = int(ema_alpha * cy + (1 - ema_alpha) * pcy)
+        _playback_ema_centers[tid] = (cx, cy)
+
+        # Only show dot for UNCOUNTED vehicles (identical to debug mode)
+        if not det.get("counted", False):
+            dots.append((cx, cy))
 
         # If vehicle just crossed counting line → start green flash bracket
+        # IMPORTANT: Only start if NOT already animating — crossed=True spans
+        # multiple frames in stored data, and resetting timer each frame causes
+        # the bracket to stay at progress=0 (black) instead of animating.
         if det.get("crossed"):
             tid = det.get("track_id", 0)
-            flash_cx = det.get("flash_cx", cx)
-            flash_cy = det.get("flash_cy", cy)
-            flash_half = det.get("flash_half", max(x2 - x1, y2 - y1) // 2 + 6)
-            _playback_flash_timers[tid] = PLAYBACK_FLASH_FRAMES
-            _playback_flash_positions[tid] = (flash_cx, flash_cy, flash_half)
+            if tid not in _playback_flash_timers or _playback_flash_timers.get(tid, 0) <= 0:
+                flash_cx = det.get("flash_cx", cx)
+                flash_cy = det.get("flash_cy", cy)
+                flash_half = det.get("flash_half", max(x2 - x1, y2 - y1) // 2 + 6)
+                _playback_flash_timers[tid] = PLAYBACK_FLASH_FRAMES
+                _playback_flash_positions[tid] = (flash_cx, flash_cy, flash_half)
 
-    # ── Green blink brackets when vehicle crosses line (AI counting visual) ──
+    # ── Build brackets list from flash state ──
+    brackets = []
     for tid in list(_playback_flash_timers.keys()):
         t = _playback_flash_timers[tid]
         if t <= 0:
             _playback_flash_timers.pop(tid, None)
             _playback_flash_positions.pop(tid, None)
             continue
-
-        fcx, fcy, fhalf = _playback_flash_positions[tid]
-        progress = (PLAYBACK_FLASH_FRAMES - t) / PLAYBACK_FLASH_FRAMES
-        alpha = abs(math.sin(math.pi * progress))
-        color = (0, int(255 * alpha), 0)
-        size = 28
-        th = 3
-        bx1, by1 = fcx - fhalf, fcy - fhalf
-        bx2, by2 = fcx + fhalf, fcy + fhalf
-
-        # Animated green fill
-        hw = int(fhalf * progress)
-        hh = int(fhalf * progress)
-        overlay_b = frame.copy()
-        cv2.rectangle(overlay_b, (fcx - hw, fcy - hh), (fcx + hw, fcy + hh), (0, 180, 0), -1)
-        cv2.addWeighted(overlay_b, 0.25 * alpha, frame, 1 - 0.25 * alpha, 0, frame)
-
-        # Corner brackets
-        cv2.line(frame, (bx1, by1), (bx1 + size, by1), color, th)
-        cv2.line(frame, (bx1, by1), (bx1, by1 + size), color, th)
-        cv2.line(frame, (bx2, by1), (bx2 - size, by1), color, th)
-        cv2.line(frame, (bx2, by1), (bx2, by1 + size), color, th)
-        cv2.line(frame, (bx1, by2), (bx1 + size, by2), color, th)
-        cv2.line(frame, (bx1, by2), (bx1, by2 - size), color, th)
-        cv2.line(frame, (bx2, by2), (bx2 - size, by2), color, th)
-        cv2.line(frame, (bx2, by2), (bx2, by2 - size), color, th)
-
+        if tid in _playback_flash_positions:
+            fcx, fcy, fhalf = _playback_flash_positions[tid]
+            progress = (PLAYBACK_FLASH_FRAMES - t) / PLAYBACK_FLASH_FRAMES
+            brackets.append((fcx, fcy, fhalf, progress))
         _playback_flash_timers[tid] = t - 1
+
+    # ── Draw shared tracking overlay (identical visuals as debug mode) ──
+    draw_tracking_overlay(frame, dots, brackets, line_config)
 
     # ── Dashboard overlay (game data from game_api) ──
     from game.game_api import get_overlay_data
     gd = get_overlay_data()
-
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (10, 10), (350, 200), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-    y = 30
-    # Round ID
-    cv2.putText(frame, f"Round #{gd['round_id']}", (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 200, 255), 1)
-    y += 22
-
-    # Stream name
-    if stream_name:
-        cv2.putText(frame, f"STREAM: {stream_name}", (20, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-        y += 28
-
-    # Vehicle count
-    cv2.putText(frame, f"COUNT: {current_count}", (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-    y += 35
-
-    # Phase
-    phase_label = "COUNTING" if counting_active else "RESULT"
-    phase_color = (0, 255, 100) if counting_active else (80, 80, 255)
-    cv2.putText(frame, f"Phase: {phase_label}", (20, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, phase_color, 1)
-    y += 22
-
-    # Odds (shown during COUNTING and WAITING)
-    odds = gd.get("odds", {})
-    if odds and gd["phase"] in ("COUNTING", "WAITING"):
-        ut = gd.get("under_threshold", 0)
-        ot = gd.get("over_threshold", 0)
-        odds_text = (f"U<{ut}:{odds.get('under', 0)}x  "
-                     f"R{ut}-{ot}:{odds.get('range', 0)}x  "
-                     f"O>{ot}:{odds.get('over', 0)}x")
-        cv2.putText(frame, odds_text, (20, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 220, 255), 1)
-
-    # ── Timer bar ──
-    bar_x, bar_y, bar_w, bar_h = 10, h - 55, w - 20, 22
-    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 40, 40), -1)
-
+    radius = 20
+    thickness = 3
+    margin = 15
+    center = (w - margin - radius, margin + radius) # top-right corner
     if counting_active:
         remaining = max(0, count_duration - elapsed_secs)
         ratio = remaining / count_duration if count_duration > 0 else 0
-        fill = int(bar_w * ratio)
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill, bar_y + bar_h), (0, 200, 60), -1)
-        label = f"COUNTING: {int(remaining) + 1}s left"
-        label_color = (0, 255, 100)
+        color = (0, 255, 100)  # green
     else:
         total_elapsed = elapsed_secs - count_duration
         remaining = max(0, wait_duration - total_elapsed)
         ratio = remaining / wait_duration if wait_duration > 0 else 0
-        fill = int(bar_w * ratio)
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill, bar_y + bar_h), (0, 60, 200), -1)
-        label = f"RESULT: {current_count} vehicles | {int(remaining) + 1}s"
-        label_color = (80, 80, 255)
+        color = (80, 80, 255)  # blue/red
 
-    cv2.putText(frame, label, (bar_x + 8, bar_y + 16),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, label_color, 2)
+    # Background circle (dark)
+    cv2.circle(frame, center, radius, (40, 40, 40), -1)
+
+    # Progress arc (fills clockwise from top)
+    if ratio > 0:
+        angle = int(360 * ratio)
+        cv2.ellipse(frame, center, (radius, radius), -90, 0, angle, color, thickness, cv2.LINE_AA)
+
+    # Count text in center of circle
+    count_text = str(current_count)
+    t_size = cv2.getTextSize(count_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+    cv2.putText(frame, count_text,
+                (center[0] - t_size[0] // 2, center[1] + t_size[1] // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
 
     return frame
 
 
 def reset_playback_flash():
     """Reset flash animation state between clips."""
-    global _playback_flash_timers, _playback_flash_positions
-    _playback_flash_timers.clear()
-    _playback_flash_positions.clear()
+    global _playback_flash_timers, _playback_flash_positions, _playback_ema_centers
+    _playback_flash_timers = {}
+    _playback_flash_positions = {}
+    _playback_ema_centers = {}

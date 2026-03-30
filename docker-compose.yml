@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    ports:
+      - "7880:7880"       # HTTP + WebSocket API
+      - "7881:7881"       # WebRTC TCP
+      - "7882:7882/udp"   # WebRTC UDP (media)
+    volumes:
+      - ./livekit.yaml:/livekit.yaml
+    command: --config /livekit.yaml --dev
+    restart: unless-stopped

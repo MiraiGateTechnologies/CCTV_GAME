@@ -38,6 +38,7 @@ from ui.animations import ist_now_str, IST
 from ui.renderer import draw_playback_overlay, reset_playback_flash
 import web_server
 from network.stream_manager import Pipeline, PreProcessedClip
+from network import livekit_publisher
 from game.round_manager import (
     prepare_round, play_clip_with_overlay, finalize_round,
     get_betting_phase_data, get_counting_phase_data, get_waiting_phase_data,
@@ -48,7 +49,7 @@ import game.game_api as game_api
 
 # ── Defaults ───────────────────────────────────────────────────────
 DEFAULT_CONFIG = "streams_config.json"
-DEFAULT_MODEL = "yolov8l.pt"
+DEFAULT_MODEL = "yolo11x.engine"
 LINE_CONFIGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "line_configs")
 DEBUG_WINDOW = "DEBUG: Background YOLO Processing"
 WINDOW_W, WINDOW_H = 1280, 720
@@ -57,15 +58,23 @@ WINDOW_W, WINDOW_H = 1280, 720
 debug_gui = False
 current_round_data: RoundData | None = None
 
+
+def push_frame(frame):
+    """Push frame to BOTH MJPEG (web_server) and LiveKit (if running).
+    Single call replaces all web_server.update_frame(frame) calls."""
+    web_server.update_frame(frame)
+    livekit_publisher.update_frame(frame)
+
 # ── Debug Drawing State (mouse callbacks in --gui mode) ────────────
 _debug_draw = {
     "drawing_line": False,
-    "temp_line": None,
-    "poly_points": [],
-    "poly_preview_pt": None,
+    "temp_line": None,           # [(x,y),(x,y)] in display coords (WINDOW_W x WINDOW_H)
+    "poly_points": [],           # [(x,y),...] in display coords
+    "poly_preview_pt": None,     # (x,y) in display coords
     "config_path": None,
     "stream_name": "",
-    "last_frame": None,
+    "last_frame": None,          # last displayed frame (WINDOW_W x WINDOW_H)
+    "original_shape": None,      # (h, w) of original frame before resize
 }
 
 
@@ -108,11 +117,37 @@ def get_active_slot(slots: list) -> dict:
 #  DEBUG GUI — Mouse callbacks + window (--gui mode only)
 # ═══════════════════════════════════════════════════════════════════
 
+def _mouse_to_original_coords(mx, my):
+    """
+    Convert mouse coords (WINDOW_W x WINDOW_H space) to ORIGINAL frame coords.
+
+    Since we resize every frame to WINDOW_W x WINDOW_H before imshow,
+    mouse coords are ALWAYS in WINDOW_W x WINDOW_H space — guaranteed.
+    No dependency on cv2.getWindowImageRect() (unreliable on Windows DPI).
+
+    We scale to original frame resolution for saving to line_configs JSON
+    (counting logic needs original-resolution coordinates).
+    """
+    orig = _debug_draw.get("original_shape")  # (h, w) of original frame
+    if orig is None:
+        return mx, my
+    orig_h, orig_w = orig
+    fx = int(mx * orig_w / WINDOW_W)
+    fy = int(my * orig_h / WINDOW_H)
+    return fx, fy
+
+
 def _debug_mouse_callback(event, x, y, flags, param):
-    """Mouse callback for debug window — draw line or ROI polygon."""
+    """Mouse callback for debug window — draw line or ROI polygon.
+
+    Mouse coords (x, y) are in WINDOW_W x WINDOW_H space because we
+    resize every frame to that size before imshow. So:
+      - Drawing preview: use (x, y) directly on the display frame
+      - Saving to config: convert to original resolution via _mouse_to_original_coords
+    """
     state = _debug_draw
     cfg_path = state.get("config_path")
-    if not cfg_path:
+    if not cfg_path or state.get("original_shape") is None:
         return
 
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -129,20 +164,25 @@ def _debug_mouse_callback(event, x, y, flags, param):
         if state["drawing_line"] and state["temp_line"]:
             state["drawing_line"] = False
             state["temp_line"][1] = (x, y)
-            line_len = math.hypot(x - state["temp_line"][0][0],
-                                  y - state["temp_line"][0][1])
+            # Convert display coords → original frame coords for config
+            fp1 = _mouse_to_original_coords(*state["temp_line"][0])
+            fp2 = _mouse_to_original_coords(*state["temp_line"][1])
+            line_len = math.hypot(fp2[0] - fp1[0], fp2[1] - fp1[1])
             if line_len >= 10:
-                data = {"line": list(state["temp_line"]), "roi_poly": None, "mode": "line"}
+                data = {"line": [list(fp1), list(fp2)], "roi_poly": None, "mode": "line"}
                 save_line_config(cfg_path, data)
-                print(f"[DEBUG GUI] Line saved: {state['stream_name']}")
+                print(f"[DEBUG GUI] Line saved: {state['stream_name']} → {[fp1, fp2]}")
             state["temp_line"] = None
 
     elif event == cv2.EVENT_RBUTTONDOWN:
         state["poly_points"].append((x, y))
+
         if len(state["poly_points"]) == 4:
-            data = {"line": None, "roi_poly": list(state["poly_points"]), "mode": "roi"}
+            # Convert all 4 display points → original frame coords
+            frame_pts = [_mouse_to_original_coords(*pt) for pt in state["poly_points"]]
+            data = {"line": None, "roi_poly": [list(p) for p in frame_pts], "mode": "roi"}
             save_line_config(cfg_path, data)
-            print(f"[DEBUG GUI] ROI saved: {state['stream_name']}")
+            print(f"[DEBUG GUI] ROI saved: {state['stream_name']} → {frame_pts}")
             state["poly_points"] = []
             state["poly_preview_pt"] = None
 
@@ -152,26 +192,30 @@ def _debug_mouse_callback(event, x, y, flags, param):
 
 
 def _draw_debug_mouse_overlay(frame):
-    """Draw in-progress line/ROI on the debug frame."""
+    """Draw in-progress line/ROI on the debug frame.
+
+    Frame is ALREADY resized to WINDOW_W x WINDOW_H before this is called.
+    Mouse coords are in the same space. So draw DIRECTLY — no conversion.
+    """
     state = _debug_draw
-    h = frame.shape[0]
 
     if state["drawing_line"] and state["temp_line"]:
-        pt1, pt2 = state["temp_line"]
-        cv2.line(frame, tuple(pt1), tuple(pt2), (0, 255, 255), 2, cv2.LINE_AA)
+        pt1 = tuple(state["temp_line"][0])
+        pt2 = tuple(state["temp_line"][1])
+        cv2.line(frame, pt1, pt2, (0, 255, 255), 2, cv2.LINE_AA)
 
     if state["poly_points"]:
         for pt in state["poly_points"]:
-            cv2.circle(frame, pt, 6, (0, 100, 255), -1)
+            cv2.circle(frame, tuple(pt), 6, (0, 100, 255), -1)
         for i in range(1, len(state["poly_points"])):
-            cv2.line(frame, state["poly_points"][i - 1],
-                     state["poly_points"][i], (0, 100, 255), 2)
+            cv2.line(frame, tuple(state["poly_points"][i - 1]),
+                     tuple(state["poly_points"][i]), (0, 100, 255), 2)
         if state["poly_preview_pt"]:
-            cv2.line(frame, state["poly_points"][-1],
-                     state["poly_preview_pt"], (0, 100, 255), 1)
+            cv2.line(frame, tuple(state["poly_points"][-1]),
+                     tuple(state["poly_preview_pt"]), (0, 100, 255), 1)
         n = len(state["poly_points"])
         cv2.putText(frame, f"ROI: {n}/4 corners (RClick {4 - n} more | MidBtn=cancel)",
-                    (10, h - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+                    (10, WINDOW_H - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
 
 def setup_debug_window():
@@ -186,6 +230,11 @@ def update_debug_window(pipeline: Pipeline) -> int:
     Poll latest debug frame from YOLO worker and display.
     Updates mouse callback state for the currently-processing stream.
     Returns key press (0xFF masked) or 0.
+
+    CRITICAL: We resize every frame to WINDOW_W x WINDOW_H before imshow.
+    This guarantees mouse coords = display coords (1:1 mapping).
+    No dependency on cv2.getWindowImageRect() (unreliable on Windows DPI).
+    Original resolution stored in _debug_draw["original_shape"] for config saving.
     """
     frame = pipeline.get_debug_frame()
 
@@ -195,15 +244,23 @@ def update_debug_window(pipeline: Pipeline) -> int:
         _debug_draw["config_path"] = info.get("config_path") or ""
         _debug_draw["stream_name"] = info.get("current_stream") or ""
 
-        _draw_debug_mouse_overlay(frame)
+        # Store ORIGINAL resolution (for converting mouse→frame coords when saving config)
+        _debug_draw["original_shape"] = frame.shape[:2]  # (h, w)
+
+        # Resize to fixed display size BEFORE any drawing
+        # This makes mouse coords = display coords (1:1, always correct)
+        display = cv2.resize(frame, (WINDOW_W, WINDOW_H))
+
+        # Draw mouse overlay on the resized display frame (coords match directly)
+        _draw_debug_mouse_overlay(display)
 
         # Stats overlay
         stats_text = pipeline.get_stats_summary()
-        cv2.putText(frame, stats_text, (frame.shape[1] - 500, 25),
+        cv2.putText(display, stats_text, (WINDOW_W - 500, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1, cv2.LINE_AA)
 
-        _debug_draw["last_frame"] = frame
-        cv2.imshow(DEBUG_WINDOW, frame)
+        _debug_draw["last_frame"] = display
+        cv2.imshow(DEBUG_WINDOW, display)
 
     elif _debug_draw["last_frame"] is not None:
         cv2.imshow(DEBUG_WINDOW, _debug_draw["last_frame"])
@@ -226,9 +283,11 @@ def show_betting_phase(rd: RoundData, duration: float,
     # Update game_api — single source of truth for all data
     game_api.update_phase(
         "BETTING", round_id=rd.round_id, stream_name=rd.stream_name,
-        commitment_hash=rd.commitment_hash,
-        odds=rd.odds, under_threshold=rd.under_threshold,
-        over_threshold=rd.over_threshold, exact_odds=rd.exact_odds,
+        commitment_hash=rd.commitment_hash, boundaries=rd.boundaries,
+        odds=rd.odds, win_chances=rd.win_chances,
+        under_threshold=rd.under_threshold,
+        over_threshold=rd.over_threshold,
+        exact_numbers=rd.exact_numbers,
     )
 
     start = time.time()
@@ -245,41 +304,10 @@ def show_betting_phase(rd: RoundData, duration: float,
         cx = WINDOW_W // 2
         remaining = int(duration - elapsed) + 1
 
-        cv2.putText(frame, "PLACE YOUR BETS", (cx - 150, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 200), 2, cv2.LINE_AA)
-        cv2.putText(frame, f"Round #{rd.round_id}", (cx - 60, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(frame, f"Stream: {rd.stream_name}", (cx - 100, 130),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
-
-        hash_short = rd.commitment_hash[:16] + "..."
-        cv2.putText(frame, f"Hash: {hash_short}", (cx - 120, 170),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 150, 200), 1, cv2.LINE_AA)
-
-        # 4 bet option boxes
-        box_w, box_h, gap = 200, 80, 30
-        start_x = cx - box_w - gap // 2
-        start_y = 220
-        options = ["UNDER", "RANGE", "OVER", "EXACT"]
-        colors = [(255, 100, 100), (100, 255, 100), (100, 100, 255), (255, 255, 100)]
-
-        for i, (opt, col) in enumerate(zip(options, colors)):
-            bx = start_x + (i % 2) * (box_w + gap)
-            by = start_y + (i // 2) * (box_h + gap)
-            cv2.rectangle(frame, (bx, by), (bx + box_w, by + box_h), col, 2, cv2.LINE_AA)
-            t_size = cv2.getTextSize(opt, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-            cv2.putText(frame, opt,
-                        (bx + (box_w - t_size[0]) // 2, by + (box_h + t_size[1]) // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
-
-        cv2.putText(frame, f"{remaining}", (cx - 20, 500),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 255, 200), 3, cv2.LINE_AA)
-        cv2.putText(frame, "seconds", (cx - 40, 530),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
-        cv2.putText(frame, f"IST {ist_now_str()}", (WINDOW_W - 180, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 140, 180), 1, cv2.LINE_AA)
-
-        web_server.update_frame(frame)
+        # Just countdown timer — clean, no data
+        cv2.putText(frame, f"{remaining}", (cx - 30, WINDOW_H // 2 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 255, 200), 4, cv2.LINE_AA)
+        push_frame(frame)
 
         # CRITICAL: Always call cv2.waitKey to process Windows messages
         # Without this → "NOT RESPONDING" error
@@ -326,6 +354,7 @@ def play_round_clip(rd: RoundData, pipeline: Pipeline = None) -> bool:
                 game_api.update_phase(
                     "WAITING", server_seed=rd.server_seed,
                     result=rd.result, vehicle_count=rd.result,
+                    bet_outcomes=rd.bet_outcomes,
                 )
 
         draw_playback_overlay(
@@ -335,7 +364,7 @@ def play_round_clip(rd: RoundData, pipeline: Pipeline = None) -> bool:
             line_config=line_config,
         )
 
-        web_server.update_frame(frame)
+        push_frame(frame)
 
         if debug_gui and pipeline:
             key = update_debug_window(pipeline)
@@ -362,6 +391,12 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
     slots, count_duration, transition_duration = load_streams_config(config_path)
     history = HistoryTracker()
 
+    # Initialize LiveKit publisher (connects to Docker container)
+    try:
+        livekit_publisher.init_publisher()
+    except Exception as e:
+        print(f"[LIVEKIT] Init failed (MJPEG fallback active): {e}")
+
     mode_str = "DEVELOPMENT (web + debug GUI)" if debug_gui else "PRODUCTION (web only)"
     print(f"\n{'=' * 60}")
     print(f"  CCTV CASINO GAME — Scheduler")
@@ -370,11 +405,14 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
     print(f"  Model          : {model_name}")
     print(f"  Round cycle    : {BETTING_DURATION}s bet + {COUNTING_DURATION}s count + {WAITING_DURATION}s wait = 56s")
     print(f"  Web            : http://localhost:{web_port}")
+    print(f"  LiveKit        : ws://localhost:7880 (room: cctv-game)")
     print(f"  IST now        : {ist_now_str()}")
     print(f"{'=' * 60}\n")
 
     print("[INIT] Loading YOLO model...")
-    model = YOLO(model_name).to("cuda")
+    model = YOLO(model_name)
+    if model_name.endswith(".pt"):
+        model = model.to("cuda")
     print("[INIT] Model ready!")
 
     if debug_gui:
@@ -399,12 +437,13 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
     # ── Cold start: add all streams from current slot ──
     active_slot = get_active_slot(slots)
     add_slot_streams(active_slot)
-    print(f"[STARTUP] {len(pipeline.downloaders)} streams downloading in parallel")
-    print(f"[STARTUP] Waiting for first approved clip...")
+    COLD_START_MIN_CLIPS = 5  # Wait for 5 processed clips before first round
+    print(f"[STARTUP] {len(pipeline.stream_names)} streams in round-robin rotation (1 download at a time)")
+    print(f"[STARTUP] Waiting for {COLD_START_MIN_CLIPS} approved clips...")
 
-    # Wait for first clip with loading animation
+    # Wait for 5 clips with loading animation
     anim_start = time.time()
-    while pipeline.ready_count() == 0 and time.time() - anim_start < 300:
+    while pipeline.ready_count() < COLD_START_MIN_CLIPS and time.time() - anim_start < 600:
         el = time.time() - anim_start
         frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
         for yr in range(WINDOW_H):
@@ -417,21 +456,23 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
 
         cv2.putText(frame, "CCTV CASINO GAME", (WINDOW_W // 2 - 140, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 180, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, "Preparing first round...", (WINDOW_W // 2 - 130, WINDOW_H // 2 + 160),
+        ready = pipeline.ready_count()
+        cv2.putText(frame, f"Preparing: {ready}/{COLD_START_MIN_CLIPS} clips ready...",
+                    (WINDOW_W // 2 - 150, WINDOW_H // 2 + 160),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1, cv2.LINE_AA)
         cv2.putText(frame, f"IST {ist_now_str()}", (WINDOW_W - 180, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 140, 180), 1, cv2.LINE_AA)
 
         stats = pipeline.get_stats()
         yolo = stats["yolo"]
-        dl_count = sum(d["downloaded"] for d in stats["downloaders"].values())
+        dl_count = stats["downloaders"]["downloaded"]
         cv2.putText(frame,
                     f"Downloads: {dl_count} | YOLO: {yolo['current'] or 'waiting'} | "
                     f"Approved: {yolo['approved']} | Ready: {stats['ready_queue']}",
                     (WINDOW_W // 2 - 250, WINDOW_H // 2 + 200),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 150, 200), 1, cv2.LINE_AA)
 
-        web_server.update_frame(frame)
+        push_frame(frame)
 
         # CRITICAL: cv2.waitKey processes Windows messages — prevents "NOT RESPONDING"
         if debug_gui:
@@ -485,7 +526,7 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
                                 (WINDOW_W // 2 - 150, WINDOW_H // 2 + 160),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 150, 200), 1, cv2.LINE_AA)
 
-                    web_server.update_frame(frame)
+                    push_frame(frame)
                     if debug_gui:
                         key = update_debug_window(pipeline)
                     else:
@@ -504,18 +545,22 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
             round_counter += 1
             rd = prepare_round(clip, round_counter, history)
 
-            print(f"\n{'─' * 50}")
+            b = rd.boundaries
+            print(f"\n{'─' * 60}")
             print(f"  ROUND #{round_counter}")
             print(f"  Stream : {clip.stream_name}")
             print(f"  Result : {rd.result} vehicles (pre-counted)")
             print(f"  Hash   : {rd.commitment_hash[:24]}...")
-            print(f"  Under  : < {rd.under_threshold}  |  "
-                  f"Range : {rd.under_threshold}-{rd.over_threshold}  |  "
-                  f"Over : > {rd.over_threshold}")
-            print(f"  Odds   : Under {rd.odds.get('under', '?')}x | "
+            print(f"  Lambda : {rd.lambda_mean} (historical mean)")
+            print(f"  Under  : < {b.get('under', '?')}  |  "
+                  f"Range : {b.get('range_low', '?')}-{b.get('range_high', '?')}  |  "
+                  f"Over : > {b.get('over', '?')}")
+            print(f"  Exact  : {b.get('exact_1', '?')} or {b.get('exact_2', '?')}")
+            print(f"  Mult   : Under {rd.odds.get('under', '?')}x | "
                   f"Range {rd.odds.get('range', '?')}x | "
-                  f"Over {rd.odds.get('over', '?')}x")
-            print(f"{'─' * 50}")
+                  f"Over {rd.odds.get('over', '?')}x | "
+                  f"Exact {rd.odds.get('exact', '?')}x (constant)")
+            print(f"{'─' * 60}")
 
             # ── PHASE 1: BETTING (15 sec) ──
             if show_betting_phase(rd, BETTING_DURATION, pipeline):
@@ -533,9 +578,11 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
                 "round_id": rd.round_id,
                 "server_seed": rd.server_seed,
                 "result": rd.result,
-                "under_threshold": rd.under_threshold,
-                "over_threshold": rd.over_threshold,
+                "boundaries": rd.boundaries,
                 "commitment_hash": rd.commitment_hash,
+                "verification_string": rd.verification_data.get(
+                    "verification_string", ""),
+                "bet_outcomes": rd.bet_outcomes,
             })
 
             print(f"  Round #{round_counter} complete | Result: {rd.result} | "
