@@ -36,6 +36,12 @@ import tempfile
 import shutil
 import cv2
 
+try:
+    import yt_dlp
+    HAS_YT_DLP = True
+except ImportError:
+    HAS_YT_DLP = False
+
 # ─────────────────────────────────────────────
 #  SETTINGS
 # ─────────────────────────────────────────────
@@ -47,7 +53,8 @@ READY_QUEUE_MAX = 10           # Max pre-processed clips ready for rounds
 DOWNLOAD_QUEUE_MAX = 5        # Max downloaded-but-unprocessed clips waiting for YOLO
 DOWNLOAD_QUEUE_TARGET = 3     # Keep exactly 3 clips in download queue
 MAX_PENDING_PER_STREAM = 2    # Max unprocessed clips per stream (throttle fast streams)
-YT_URL_CACHE_TTL = 4 * 3600  # Refresh YouTube URLs every 4 hours (was 2, reduced 429s)
+YT_URL_CACHE_TTL = 5 * 3600  # Refresh YouTube URLs every 5 hours (live URLs valid ~6h)
+YT_URL_REFRESH_INTERVAL = 4 * 3600  # Background refresh every 4 hours
 
 
 # ─────────────────────────────────────────────
@@ -105,6 +112,7 @@ class SequentialDownloader:
         self.download_queue = download_queue
         self.streams: list[dict] = []   # [{name, url, config, imgsz, conf}, ...]
         self.is_running = True
+        self._prewarm_done = threading.Event()  # Signals when URL prewarm is complete
 
         # Per-stream YouTube URL cache: {youtube_url: (resolved_url, timestamp)}
         self._url_cache: dict[str, tuple[str, float]] = {}
@@ -122,11 +130,14 @@ class SequentialDownloader:
         # Temp directory
         self.temp_dir = tempfile.mkdtemp(prefix="cctv_dl_seq_")
 
-        # Single download thread
+        # Single download thread (waits for prewarm before starting downloads)
         self.thread = threading.Thread(
             target=self._download_loop, daemon=True, name="DL-Sequential",
         )
         self.thread.start()
+
+        # Background URL refresh thread (refreshes cached URLs every 4 hours)
+        self._start_url_refresh_thread()
 
     def add_stream(self, name: str, url: str, config_path: str,
                    imgsz: int = 1600, confidence: float = 0.10):
@@ -146,40 +157,75 @@ class SequentialDownloader:
         self.streams = [s for s in self.streams if s["name"] != name]
         self._failures.pop(name, None)
 
-    # ── URL Resolution ──
+    # ── URL Resolution (yt-dlp Python API — no subprocess, no timeout) ──
 
     def _is_youtube(self, url: str) -> bool:
         return "youtube.com" in url or "youtu.be" in url
 
-    def _resolve_url(self, stream_name: str, stream_url: str) -> str | None:
-        """YouTube → yt-dlp resolve (cached). HLS/RTSP → direct URL."""
+    def _resolve_url_api(self, stream_name: str, stream_url: str) -> str | None:
+        """Resolve YouTube URL using yt-dlp Python API — fast, no subprocess timeout.
+
+        Uses browser cookies to avoid 429 rate limiting.
+        Falls back to subprocess if yt-dlp Python API not available.
+        """
         if not self._is_youtube(stream_url):
             return stream_url
 
-        # Check cache
+        # Check cache — return instantly if valid
         cached = self._url_cache.get(stream_url)
         if cached and (time.time() - cached[1] < YT_URL_CACHE_TTL):
             return cached[0]
 
         ts = time.strftime("%H:%M:%S")
         print(f"[{ts}] [RESOLVE] {stream_name}: Resolving YouTube URL...")
-        try:
-            cmd = [
-                sys.executable, "-m", "yt_dlp",
-                "--get-url",
-                "-f", "best[ext=mp4][height<=720]/best[ext=mp4]/best",
-                "--no-playlist",
-                stream_url,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            url = result.stdout.strip().split('\n')[0]
-            if url and url.startswith("http"):
-                self._url_cache[stream_url] = (url, time.time())
-                self._yt_fail_count = 0
-                print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: OK")
-                return url
 
-            err = result.stderr.strip()[:200]
+        if not HAS_YT_DLP:
+            print(f"[RESOLVE] yt-dlp not installed! pip install yt-dlp")
+            return None
+
+        try:
+            ydl_opts = {
+                'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
+                'no_playlist': True,
+                'quiet': True,
+                'no_warnings': True,
+            }
+
+            # Try browser cookies (Chrome → Edge → Firefox)
+            # This prevents 429 — YouTube sees you as logged-in user
+            cookies_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        '..', 'cookies.txt')
+            if os.path.exists(cookies_file):
+                ydl_opts['cookiefile'] = cookies_file
+            else:
+                # Try extracting from browser automatically
+                for browser in ('chrome', 'edge', 'firefox'):
+                    try:
+                        ydl_opts['cookiesfrombrowser'] = (browser,)
+                        break
+                    except Exception:
+                        continue
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(stream_url, download=False)
+                url = info.get('url')
+                if not url:
+                    # For DASH/HLS, get manifest URL
+                    formats = info.get('formats', [])
+                    if formats:
+                        url = formats[-1].get('url')
+
+                if url:
+                    self._url_cache[stream_url] = (url, time.time())
+                    self._yt_fail_count = 0
+                    print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: OK")
+                    return url
+
+            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: No URL found")
+            return None
+
+        except Exception as e:
+            err = str(e)[:200]
             print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Failed — {err}")
             if "429" in err or "Too Many Requests" in err:
                 backoff = min(300, 10 * (2 ** self._yt_fail_count))
@@ -189,12 +235,80 @@ class SequentialDownloader:
             else:
                 self._yt_fail_count = 0
             return None
-        except subprocess.TimeoutExpired:
-            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Timed out (30s)")
-            return None
-        except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [RESOLVE] {stream_name}: Error — {e}")
-            return None
+
+    def prewarm_urls(self):
+        """Pre-resolve ALL stream URLs at startup. Call BEFORE download loop starts.
+
+        Resolves all YouTube URLs in one go so the download loop
+        never waits for yt-dlp. If a URL fails, retries 3 times.
+        """
+        if not self.streams:
+            return
+
+        youtube_streams = [s for s in self.streams if self._is_youtube(s["url"])]
+        if not youtube_streams:
+            print("[PREWARM] No YouTube streams to resolve")
+            return
+
+        print(f"[PREWARM] Resolving {len(youtube_streams)} YouTube URLs...")
+
+        for stream in youtube_streams:
+            name = stream["name"]
+            url = stream["url"]
+
+            # Already cached?
+            cached = self._url_cache.get(url)
+            if cached and (time.time() - cached[1] < YT_URL_CACHE_TTL):
+                print(f"[PREWARM] {name}: cached ✓")
+                continue
+
+            # Try up to 3 times
+            for attempt in range(3):
+                resolved = self._resolve_url_api(name, url)
+                if resolved:
+                    break
+                if attempt < 2:
+                    wait = 5 * (attempt + 1)
+                    print(f"[PREWARM] {name}: retry {attempt + 2}/3 in {wait}s...")
+                    time.sleep(wait)
+
+            if not resolved:
+                print(f"[PREWARM] {name}: FAILED after 3 attempts — will retry in download loop")
+
+        cached_count = sum(1 for s in youtube_streams if s["url"] in self._url_cache)
+        print(f"[PREWARM] Done: {cached_count}/{len(youtube_streams)} URLs cached ✓")
+
+    def _start_url_refresh_thread(self):
+        """Start background thread that refreshes cached URLs periodically.
+
+        Runs every YT_URL_REFRESH_INTERVAL (4 hours). Refreshes one stream
+        at a time with 30 sec gap to avoid YouTube 429.
+        """
+        def _refresh_loop():
+            while self.is_running:
+                time.sleep(YT_URL_REFRESH_INTERVAL)
+                if not self.is_running:
+                    break
+
+                youtube_streams = [s for s in self.streams if self._is_youtube(s["url"])]
+                if not youtube_streams:
+                    continue
+
+                print(f"[URL-REFRESH] Refreshing {len(youtube_streams)} YouTube URLs...")
+                for stream in youtube_streams:
+                    if not self.is_running:
+                        break
+                    # Force refresh by clearing cache for this URL
+                    self._url_cache.pop(stream["url"], None)
+                    self._resolve_url_api(stream["name"], stream["url"])
+                    # 30 sec gap between streams to avoid 429
+                    time.sleep(30)
+
+                cached_count = sum(1 for s in youtube_streams if s["url"] in self._url_cache)
+                print(f"[URL-REFRESH] Done: {cached_count}/{len(youtube_streams)} refreshed ✓")
+
+        thread = threading.Thread(target=_refresh_loop, daemon=True, name="URL-Refresh")
+        thread.start()
 
     # ── Download ──
 
@@ -204,7 +318,7 @@ class SequentialDownloader:
         ts = time.strftime("%H:%M:%S")
         print(f"[{ts}] [DL] {stream_name}: Downloading {CLIP_DURATION}s clip...")
 
-        download_url = self._resolve_url(stream_name, stream_url)
+        download_url = self._resolve_url_api(stream_name, stream_url)
         if not download_url:
             return False
 
@@ -219,7 +333,10 @@ class SequentialDownloader:
             "-reconnect_delay_max", "5",
             "-i", download_url,
             "-t", str(CLIP_DURATION),
-            "-c", "copy",
+            "-r", "20",                      # ← force output to 30fps
+            "-c:v", "h264_nvenc",              # ← re-encode needed for fps change
+            "-preset", "p1",          # ← fastest encoding (minimal CPU)
+            "-cq", "28",                    # ← quality (lower=better, 23=default)
             "-movflags", "+faststart",
             output_path,
         ]
@@ -286,6 +403,9 @@ class SequentialDownloader:
 
     def _download_loop(self):
         index = 0
+
+        # Wait for URL prewarm to complete (max 120 sec, then start anyway)
+        self._prewarm_done.wait(timeout=120)
 
         while self.is_running:
             # No streams added yet → wait
@@ -555,6 +675,12 @@ class Pipeline:
 
         print(f"[PIPELINE] Added stream: {stream_name} "
               f"(total: {len(self.stream_names)} streams)")
+
+    def prewarm_urls(self):
+        """Pre-resolve all YouTube URLs before downloads begin.
+        Call this AFTER all streams are added, BEFORE waiting for clips."""
+        self.downloader.prewarm_urls()
+        self.downloader._prewarm_done.set()  # Signal download loop to start
 
     def remove_stream(self, stream_name: str):
         """Remove a stream from the download rotation."""

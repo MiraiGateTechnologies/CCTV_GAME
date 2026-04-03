@@ -437,6 +437,11 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
     # ── Cold start: add all streams from current slot ──
     active_slot = get_active_slot(slots)
     add_slot_streams(active_slot)
+
+    # Pre-resolve all YouTube URLs BEFORE downloads begin (eliminates 429/timeout)
+    print(f"[STARTUP] Pre-warming YouTube URLs for {len(pipeline.stream_names)} streams...")
+    pipeline.prewarm_urls()
+
     COLD_START_MIN_CLIPS = 5  # Wait for 5 processed clips before first round
     print(f"[STARTUP] {len(pipeline.stream_names)} streams in round-robin rotation (1 download at a time)")
     print(f"[STARTUP] Waiting for {COLD_START_MIN_CLIPS} approved clips...")
@@ -597,6 +602,177 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  TEST VIDEO MODE — Use local video file instead of live streams
+# ═══════════════════════════════════════════════════════════════════
+
+def run_test_video(video_path: str, stream_name: str, model_name: str,
+                   imgsz: int, gui: bool = False, web_port: int = 5000):
+    """
+    Test mode: runs full round cycle using a local video file.
+    Same AI code as production — offline_count() + playback overlay.
+    Loops the same video for multiple rounds.
+
+    Usage:
+      python scheduler.py --test-video path/to/video.mp4
+      python scheduler.py --test-video path/to/video.mp4 --gui
+      python scheduler.py --test-video path/to/video.mp4 --test-stream-name "Stream 7"
+    """
+    global debug_gui, current_round_data
+    debug_gui = gui
+
+    if not os.path.exists(video_path):
+        print(f"[TEST] ERROR: Video file not found: {video_path}")
+        return
+
+    web_server.start_server(web_port)
+    history = HistoryTracker()
+
+    try:
+        livekit_publisher.init_publisher()
+    except Exception as e:
+        print(f"[LIVEKIT] Init failed (MJPEG fallback active): {e}")
+
+    mode_str = "TEST + GUI" if gui else "TEST (web only)"
+    print(f"\n{'=' * 60}")
+    print(f"  CCTV CASINO GAME — Test Video Mode")
+    print(f"  Mode           : {mode_str}")
+    print(f"  Video          : {video_path}")
+    print(f"  Stream name    : {stream_name}")
+    print(f"  Model          : {model_name}")
+    print(f"  Round cycle    : {BETTING_DURATION}s bet + {COUNTING_DURATION}s count + {WAITING_DURATION}s wait = 56s")
+    print(f"  Web            : http://localhost:{web_port}")
+    print(f"  IST now        : {ist_now_str()}")
+    print(f"{'=' * 60}\n")
+
+    print("[INIT] Loading YOLO model...")
+    model = YOLO(model_name)
+    if model_name.endswith(".pt"):
+        model = model.to("cuda")
+    print("[INIT] Model ready!")
+
+    if gui:
+        setup_debug_window()
+
+    # Line config for this stream
+    cfg_path = stream_config_path(stream_name)
+
+    round_counter = 0
+
+    try:
+        while True:
+            # ── PROCESS VIDEO WITH YOLO (same offline_count as production) ──
+            print(f"\n[TEST] Processing video with YOLO...")
+            from core.counting import offline_count
+
+            # Debug callback for GUI mode
+            debug_cb = None
+            if gui:
+                _debug_draw["config_path"] = cfg_path
+                _debug_draw["stream_name"] = stream_name
+
+                def _make_debug_cb():
+                    from core.counting import render_debug_frame
+                    import queue as _q
+
+                    def _cb(frame, frame_no, counter, results, counting_active):
+                        annotated = frame.copy()
+                        clip_fps = 25.0
+                        render_debug_frame(
+                            annotated, counter, results, counting_active,
+                            frame_no, clip_fps, stream_name=stream_name,
+                        )
+                        _draw_debug_mouse_overlay(annotated)
+                        _debug_draw["last_frame"] = annotated
+                        cv2.imshow(DEBUG_WINDOW, annotated)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            raise KeyboardInterrupt
+
+                    return _cb
+
+                debug_cb = _make_debug_cb()
+
+            result = offline_count(
+                clip_path=video_path,
+                line_config_file=cfg_path,
+                model=model,
+                count_duration=COUNTING_DURATION,
+                confidence=0.10,
+                imgsz=imgsz,
+                debug_callback=debug_cb,
+            )
+
+            if result is None:
+                print("[TEST] ERROR: offline_count returned None")
+                time.sleep(5)
+                continue
+
+            count = result["result"]
+            print(f"[TEST] YOLO done: count={count} | "
+                  f"{result['total_frames_processed']} frames | "
+                  f"fps={result.get('clip_fps', 25)}")
+
+            # ── CREATE PreProcessedClip (same as production pipeline) ──
+            clip = PreProcessedClip(
+                clip_path=video_path,
+                stream_name=stream_name,
+                result=count,
+                detections=result["detections"],
+                counting_events=result["counting_events"],
+                total_frames=result["total_frames_processed"],
+                clip_fps=result.get("clip_fps", 25.0),
+            )
+
+            # ── PREPARE ROUND (same as production) ──
+            round_counter += 1
+            rd = prepare_round(clip, round_counter, history)
+
+            b = rd.boundaries
+            print(f"\n{'─' * 60}")
+            print(f"  TEST ROUND #{round_counter}")
+            print(f"  Video  : {video_path}")
+            print(f"  Stream : {stream_name}")
+            print(f"  Result : {rd.result} vehicles (pre-counted)")
+            print(f"  Hash   : {rd.commitment_hash[:24]}...")
+            print(f"  Under  : < {b.get('under', '?')}  |  "
+                  f"Range : {b.get('range_low', '?')}-{b.get('range_high', '?')}  |  "
+                  f"Over : > {b.get('over', '?')}")
+            print(f"  Exact  : {b.get('exact_1', '?')} or {b.get('exact_2', '?')}")
+            print(f"{'─' * 60}")
+
+            # ── PHASE 1: BETTING (15 sec) — same as production ──
+            if show_betting_phase(rd, BETTING_DURATION, pipeline=None):
+                break
+
+            # ── PHASE 2+3: COUNTING (35s) + WAITING (6s) — same as production ──
+            if play_round_clip(rd, pipeline=None):
+                break
+
+            # ── FINALIZE — same as production ──
+            finalize_round(rd, history)
+
+            web_server.update_verification({
+                "round_id": rd.round_id,
+                "server_seed": rd.server_seed,
+                "result": rd.result,
+                "boundaries": rd.boundaries,
+                "commitment_hash": rd.commitment_hash,
+                "verification_string": rd.verification_data.get(
+                    "verification_string", ""),
+                "bet_outcomes": rd.bet_outcomes,
+            })
+
+            print(f"  Test round #{round_counter} complete | Result: {rd.result}")
+            print(f"  [Looping same video for next round...]")
+
+    except KeyboardInterrupt:
+        print("\n[TEST] Interrupted by user")
+    finally:
+        if gui:
+            cv2.destroyAllWindows()
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════
 
@@ -606,7 +782,7 @@ def main():
                         help="Path to streams_config.json")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                         help="YOLO model file")
-    parser.add_argument("--imgsz", type=int, default=1600,
+    parser.add_argument("--imgsz", type=int, default=1248,
                         help="YOLO input image size")
     parser.add_argument("--gui", action="store_true",
                         help="Development mode: debug GUI window showing live "
@@ -615,6 +791,13 @@ def main():
                         help="Flask web server port")
     parser.add_argument("--test", action="store_true",
                         help="Validate config and exit")
+    parser.add_argument("--test-video", type=str, default=None,
+                        help="Test mode: use a local 41s video file instead of "
+                             "downloading from streams. Runs full round cycle "
+                             "(betting→counting→waiting) with the same AI code. "
+                             "Loops the same video for multiple rounds.")
+    parser.add_argument("--test-stream-name", type=str, default="TestStream",
+                        help="Stream name to use for test-video (for line_config lookup)")
     args = parser.parse_args()
 
     if args.test:
@@ -623,6 +806,11 @@ def main():
               f"count_duration={cd}, transition_duration={td}")
         total_streams = sum(len(s.get("streams", [])) for s in slots)
         print(f"[TEST] Total streams: {total_streams}")
+        return
+
+    if args.test_video:
+        run_test_video(args.test_video, args.test_stream_name,
+                       args.model, args.imgsz, args.gui, args.web_port)
         return
 
     run_scheduler(args.config, args.model, args.imgsz, args.gui, args.web_port)

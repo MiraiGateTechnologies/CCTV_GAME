@@ -235,7 +235,6 @@ def draw_zones(frame, counter, line_color, roi_color):
 _playback_flash_timers = {}  # track_id -> remaining frames
 _playback_flash_positions = {}  # track_id -> (cx, cy, half_size)
 PLAYBACK_FLASH_FRAMES = 4  # match old draw_glow_bracket flash_frames=4
-_playback_ema_centers = {}  # {track_id: (cx, cy)} — EMA smoothed dots
 
 
 def draw_playback_overlay(frame, frame_no: int, current_count: int,
@@ -265,7 +264,10 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
 
     h, w = frame.shape[:2]
 
-    # ── Build dots list (uncounted vehicles only — same filter as debug mode) ──
+    # ── Build dots from stored tracked_vehicles data ──
+    # Stored data already contains predicted positions + persistence from
+    # the tracked_vehicles system in counting.py. No ghost dots or EMA needed
+    # here — playback is an exact replay of what debug mode computed.
     dots = []
     for det in detections:
         bbox = det.get("bbox", [0, 0, 0, 0])
@@ -273,27 +275,12 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         tid = det.get("track_id", 0)
 
-        # EMA smoothing — IDENTICAL to counting.py:203-207
-        # Uses box_area to determine alpha (same formula as process_detections)
-        box_area = (x2 - x1) * (y2 - y1)
-        ema_alpha = 0.30 if box_area < 2000 else 0.45
-
-        if tid in _playback_ema_centers:
-            pcx, pcy = _playback_ema_centers[tid]
-            cx = int(ema_alpha * cx + (1 - ema_alpha) * pcx)
-            cy = int(ema_alpha * cy + (1 - ema_alpha) * pcy)
-        _playback_ema_centers[tid] = (cx, cy)
-
-        # Only show dot for UNCOUNTED vehicles (identical to debug mode)
+        # Show dot for UNCOUNTED vehicles only (identical to debug mode)
         if not det.get("counted", False):
             dots.append((cx, cy))
 
         # If vehicle just crossed counting line → start green flash bracket
-        # IMPORTANT: Only start if NOT already animating — crossed=True spans
-        # multiple frames in stored data, and resetting timer each frame causes
-        # the bracket to stay at progress=0 (black) instead of animating.
         if det.get("crossed"):
-            tid = det.get("track_id", 0)
             if tid not in _playback_flash_timers or _playback_flash_timers.get(tid, 0) <= 0:
                 flash_cx = det.get("flash_cx", cx)
                 flash_cy = det.get("flash_cy", cy)
@@ -355,7 +342,6 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
 
 def reset_playback_flash():
     """Reset flash animation state between clips."""
-    global _playback_flash_timers, _playback_flash_positions, _playback_ema_centers
+    global _playback_flash_timers, _playback_flash_positions
     _playback_flash_timers = {}
     _playback_flash_positions = {}
-    _playback_ema_centers = {}

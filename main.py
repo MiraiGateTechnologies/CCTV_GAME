@@ -35,8 +35,8 @@ import web_server
 #  CONFIGURATION
 # ─────────────────────────────────────────────
 CONFIG = {
-    "model":             "yolo11m.pt",
-    "confidence":        0.010,          # Low = detect more (incl. far vehicles)
+    "model":             "yolo11x.engine",
+    "confidence":        0.30,          # Low = detect more (incl. far vehicles)
     "min_box_area":      0,            # Far vehicles can be ~7x8=56px area
     "imgsz":             1600,          # KEY: higher res = far vehicles detected!
     "line_color":        (0, 255, 0),
@@ -107,7 +107,8 @@ def main():
         stream_source = args.url
 
     print(f"[INFO] YOLO model loading: {args.model}")
-    model = YOLO(args.model, task="detect").to("cuda")
+    # model = YOLO(args.model, task="detect").to("cuda")
+    model = YOLO(args.model, task="detect")
     print("[OK] Model ready!")
 
     cap = cv2.VideoCapture(stream_source)
@@ -119,7 +120,7 @@ def main():
     vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     vid_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    yolo_imgsz = (round(vid_h / 32) * 32, round(vid_w / 32) * 32)
+    yolo_imgsz = 1600
     print(f"[INFO] Video: {vid_w}x{vid_h} @ {vid_fps:.1f}fps")
 
     counter = VehicleCounter(

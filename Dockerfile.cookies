@@ -1,0 +1,10 @@
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+WORKDIR /app
+
+RUN pip install playwright yt-dlp && \
+    playwright install chromium
+
+COPY cookie_refresher/refresh.py .
+
+CMD ["python", "refresh.py"]

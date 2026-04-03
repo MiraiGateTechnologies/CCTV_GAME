@@ -8,38 +8,61 @@ AI counts vehicles crossing a line/zone in 35-second rounds, and results drive U
 ## Architecture
 
 ```
-StreamDownloader (N parallel, no GPU)     Download 41s clips from live CCTV
+SequentialDownloader (1 thread, round-robin, NO GPU)
+  YouTube URL pre-warm (yt-dlp Python API + cookies)
+  → ffmpeg download 41s clips → quality check
          |
-    download_queue
+    download_queue (target: 3 clips)
          |
-YOLOWorker (1 thread, owns GPU)          offline_count() on each clip
+YOLOWorker (1 thread, OWNS GPU)
+  GPU warmup on startup → offline_count() on each clip
+  tracked_vehicles system (velocity prediction, zero flicker)
          |
-    ready_queue (pre-processed clips)
+    ready_queue (max 10 pre-processed clips)
          |
-Scheduler (main thread)                  56-sec round cycle
+Scheduler (main thread)
+  Cold start: waits for 5 clips → then 56-sec round cycle
   |-- BETTING  (15s)  No stream, hash published
   |-- COUNTING (35s)  Clip plays with detection overlay
   |-- WAITING  (6s)   Stream continues, result revealed
          |
-FastAPI Server                            REST + WebSocket + MJPEG
+FastAPI Server — REST + WebSocket + MJPEG + LiveKit WebRTC
 ```
 
 ---
 
 ## Quick Start
 
+### Prerequisites
+
+- **GPU:** NVIDIA with CUDA (tested on RTX 4060 Ti 8GB)
+- **Python:** 3.10+
+- **ffmpeg:** installed and in PATH
+
+### Installation
+
 ```bash
+cd D:\cctv_main\CCTV_GAME
+
+# Create virtual environment
+python -m venv venv
+venv\Scripts\activate
+
 # Install dependencies
 pip install ultralytics opencv-python fastapi uvicorn[standard] numpy yt-dlp livekit livekit-api
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install tensorrt-cu12   # for TensorRT engine support
+pip install tensorrt-cu12
 
-# Export TensorRT engine (one-time, 10-30 min)
-yolo export model=yolo11x.pt format=engine imgsz=1600 half=True
+# Export TensorRT engine (one-time, 5-15 min)
+yolo export model=yolo11x.pt format=engine imgsz=1248 half=True device=0 workspace=4
 
-# Start LiveKit server (optional, MJPEG works without it)
+# (Optional) Start LiveKit server for WebRTC streaming
 .\start_livekit.bat
+```
 
+### Running
+
+```bash
 # Production mode (web browser only)
 python scheduler.py --config streams_config.json
 
@@ -49,6 +72,12 @@ python scheduler.py --config streams_config.json --gui
 # Single stream testing
 python main.py --url "https://www.youtube.com/live/VIDEO_ID"
 python main.py --video video1
+
+# Validate config without running
+python scheduler.py --test
+
+# Download test clips
+python network/download.py --url "URL" --name video1 --duration 300
 ```
 
 **Web interface:** http://localhost:5000
@@ -63,19 +92,19 @@ python main.py --video video1
 ```
 CCTV_GAME/
 |-- core/
-|   |-- counting.py            VehicleCounter + offline_count()
+|   |-- counting.py            VehicleCounter + offline_count() + tracked_vehicles system
 |   |-- geometry_utils.py      Line intersection, point-in-polygon
 |   |-- config_manager.py      JSON config I/O
 |   |-- odds_engine.py         Boundary generation from lambda_mean + constant multipliers
 |   |-- provably_fair.py       SHA-256 commitment scheme for real-world event fairness
 |
 |-- game/
-|   |-- game_api.py            Single source of truth for game state
+|   |-- game_api.py            Single source of truth for game state (thread-safe)
 |   |-- round_manager.py       Round preparation + clip playback
-|   |-- history_tracker.py     Per-stream count history for odds
+|   |-- history_tracker.py     Per-stream count history for odds (max 500 rounds)
 |
 |-- network/
-|   |-- stream_manager.py      Parallel downloads + YOLO worker pipeline
+|   |-- stream_manager.py      Sequential download + YOLO worker pipeline
 |   |-- download.py            yt-dlp wrapper for URL resolution
 |   |-- livekit_publisher.py   Publish frames to LiveKit room via WebRTC
 |
@@ -83,21 +112,31 @@ CCTV_GAME/
 |   |-- renderer.py            Shared tracking overlay (debug + playback), dashboards
 |   |-- animations.py          Globe transition, IST timer
 |
+|-- model_training/            Custom model training pipeline (knowledge distillation)
+|   |-- extract_frames.py      Extract frames from CCTV clips
+|   |-- auto_label.py          Auto-label with teacher model (yolo11x)
+|   |-- verify_labels.py       Visual label QA tool
+|   |-- train.bat              Training command
+|   |-- export_engine.bat      TensorRT export command
+|   |-- deploy.py              Deployment helper (copy model + update code)
+|   |-- dataset.yaml           Training dataset config
+|
 |-- main.py                    Single stream entry point (development/testing)
 |-- scheduler.py               Multi-stream game orchestrator (production)
 |-- web_server.py              FastAPI + Uvicorn + WebSocket
 |
 |-- streams_config.json        IST time slots + stream URLs
 |-- bytetrack.yaml             ByteTrack tracker config
-|-- line_configs/              Per-stream counting line/ROI configs
+|-- line_configs/              Per-stream counting line/ROI configs (auto-saved)
 |-- round_history.json         Persisted count history for odds
+|-- cookies.txt                (Optional) YouTube cookies for anti-429
 |-- templates/index.html       Web viewer (LiveKit WebRTC + MJPEG fallback)
 |
 |-- livekit_server/
 |   |-- livekit-server.exe     LiveKit native binary (no Docker needed)
-|-- start_livekit.bat          Start LiveKit server (double-click)
+|-- start_livekit.bat          Start LiveKit server
 |-- docker-compose.yml         LiveKit via Docker (alternative)
-|-- livekit.yaml               LiveKit server config (API key/secret)
+|-- livekit.yaml               LiveKit server config
 ```
 
 ---
@@ -122,21 +161,20 @@ CCTV_GAME/
 ## AI Counting Pipeline
 
 ### Detection
-- **Model:** YOLO11x TensorRT engine (default: `yolo11x.engine`, configurable via --model)
+
+- **Model:** YOLO11x TensorRT engine (default: `yolo11x.engine`, configurable via `--model`)
 - **Classes:** Car (2), Motorcycle (3), Bus (5), Truck (7)
 - **Confidence:** 0.10 (catches distant vehicles)
-- **Input resolution:** 1600px (baked into TensorRT engine)
+- **Input resolution:** 1248px (baked into TensorRT engine via `--imgsz`)
 - **Precision:** FP16 (TensorRT half precision)
-- **Tracker:** ByteTrack (persistent IDs, 150-frame buffer = 5s at 30fps)
+- **Tracker:** ByteTrack (persistent IDs, 180-frame buffer = 6s at 30fps)
+- **NMS IoU:** 0.45
 
 ### TensorRT (GPU-Optimized Inference)
 
-The default model is a TensorRT engine — pre-compiled CUDA kernels for max speed.
-
 ```bash
-# Export (one-time, 10-30 min, GPU-specific)
-yolo export model=yolo11x.pt format=engine imgsz=1600 half=True
-# Creates: yolo11x.engine (~200MB)
+# Export (one-time, 5-15 min, GPU-specific)
+yolo export model=yolo11x.pt format=engine imgsz=1248 half=True device=0 workspace=4
 
 # Use .pt for development, .engine for production
 python scheduler.py --model yolo11x.pt      # PyTorch (flexible, slower)
@@ -144,76 +182,84 @@ python scheduler.py --model yolo11x.engine  # TensorRT (fast, GPU-locked)
 ```
 
 **Notes:**
-- Engine file is GPU-specific — export on the same GPU that will run it
-- `imgsz` is fixed at export time (1600) — changing requires re-export
-- `.engine` files skip `.to("cuda")` automatically (already on GPU)
-- `.pt` files still work (auto-moved to CUDA)
+- Engine file is GPU-specific -- export on the same GPU that will run it
+- `imgsz` is fixed at export time -- changing requires re-export
+- `.engine` files skip `.to("cuda")` automatically
+- GPU warmup runs automatically on startup (10 dummy frames)
+
+### Persistent Vehicle Tracking (tracked_vehicles system)
+
+White tracking dots use a YOLO-independent persistence system:
+
+```
+YOLO detects vehicle    → tracked_vehicles UPDATE (position + velocity)
+YOLO misses 1-5 frames → tracked_vehicles PREDICT (velocity-based motion)
+Vehicle leaves frame    → tracked_vehicles REMOVE (dot disappears)
+```
+
+**Guarantees:**
+- **No flicker:** Dots come from tracked_vehicles, not YOLO directly. Prediction bridges missed frames.
+- **No snake trail:** Position = raw bbox center (zero EMA lag). Only velocity is smoothed.
+- **No random dots:** Velocity clamped to 15px/frame max. Boundary check removes out-of-frame predictions.
+- **No double dots:** Spatial dedup prevents two dots on same vehicle.
+- **No miss counting:** Line crossing checked even during predicted frames.
 
 ### Counting Modes
+
 - **Line mode:** Vehicle centroid crosses the drawn line = counted
 - **ROI mode:** Vehicle enters then exits the drawn polygon = counted
-- One mode at a time per stream. Config stored in line_configs/
+- One mode at a time per stream. Config stored in `line_configs/`
 
 ### Deduplication
+
 - **Spatial cooldown:** 20px radius + 0.5 second window (line mode)
 - **ROI footprint:** IoU > 0.25 overlap check prevents double-counting
 
 ### Pre-Processing (Background)
-1. Download 41s clip via ffmpeg (-c copy, no re-encoding)
-2. Download queue maintained at exactly 3 clips (smart throttling)
-3. Run YOLO on first 35 seconds (every frame, no skip)
-4. Validate: count >= 5, blur > 15, brightness 10-250
-5. Store: clip + total count + per-frame detections + counting events
-6. Push to ready queue (cold start waits for 5 clips before first round)
+
+1. Pre-warm ALL YouTube URLs at startup (yt-dlp Python API + browser cookies)
+2. Download 41s clip via ffmpeg (h264_nvenc GPU encoding at 20fps)
+3. Download queue maintained at exactly 3 clips (smart throttling)
+4. Run YOLO on first 35 seconds only (every frame, no skip)
+5. Store tracked_vehicles positions per frame (including predicted)
+6. Validate: count >= 5, blur > 15, brightness 10-250
+7. Push to ready queue (cold start waits for 5 clips before first round)
+8. Background URL refresh thread runs every 4 hours
 
 ### Playback (During Round)
+
 - Pre-recorded clip plays at native FPS
-- **No YOLO running** during playback - stored detections are overlaid
+- **No YOLO running** during playback -- stored tracked_vehicles data is overlaid
 - Green flash brackets on counted vehicles
-- White tracking dots on **uncounted** vehicles only (dots disappear after counting)
-- **Shared renderer** (`draw_tracking_overlay`) guarantees pixel-identical visuals
-  between debug GUI mode and playback mode — single source of truth
+- White tracking dots on uncounted vehicles only (disappear after counting)
+- **Shared renderer** (`draw_tracking_overlay`) guarantees pixel-identical visuals between debug GUI mode and playback mode
+- Stored data includes predicted positions -- playback is exact replay of debug mode
 - Frame pacing ensures zero frame skip
 
 ---
 
 ## Video Streaming (LiveKit WebRTC + MJPEG Fallback)
 
-Two streaming modes with automatic fallback:
-
 ```
 Browser loads page
-  → Tries LiveKit WebRTC (low latency, adaptive quality)
-    → SUCCESS: green dot "LIVE (WebRTC)"
-    → FAIL: falls back to MJPEG (always works)
-      → orange dot "LIVE (MJPEG)"
-  → Retries LiveKit every 10 seconds
+  -> Tries LiveKit WebRTC (low latency, adaptive quality)
+    -> SUCCESS: green dot "LIVE (WebRTC)"
+    -> FAIL: falls back to MJPEG (always works)
+      -> orange dot "LIVE (MJPEG)"
+  -> Retries LiveKit every 10 seconds
 ```
 
 ### LiveKit Setup
 
 ```bash
-# Option 1: Native binary (recommended, no Docker needed)
+# Option 1: Native binary (recommended, no Docker)
 start_livekit.bat
-# OR:
-livekit_server\livekit-server.exe --config livekit.yaml
 
-# Option 2: Docker (alternative)
+# Option 2: Docker
 docker compose up -d
 ```
 
 Config: `livekit.yaml` (API key: `devkey`, secret: `secret`)
-
-### LiveKit API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/livekit/token?identity=player1` | Generate viewer JWT token |
-| `GET /api/livekit/status` | Check publisher connection status |
-
-### Without Docker
-
-LiveKit is optional. Without it, MJPEG streaming works as before. The frontend auto-detects and uses the available method.
 
 ---
 
@@ -225,7 +271,7 @@ LiveKit is optional. Without it, MJPEG streaming works as before. The frontend a
 |----------|-------------|
 | `GET /` | HTML game viewer (MJPEG stream) |
 | `GET /video_feed` | Raw MJPEG video stream |
-| `GET /api/round` | **Primary** - current round data (timer, count, odds, hash) |
+| `GET /api/round` | **Primary** -- current round data (timer, count, odds, hash) |
 | `GET /api/state` | Raw game state from scheduler |
 | `GET /api/verify` | Provably fair verification for last round |
 | `GET /api/livekit/token` | LiveKit viewer JWT token |
@@ -240,31 +286,6 @@ LiveKit is optional. Without it, MJPEG streaming works as before. The frontend a
 | `game_state` | Phase change | Phase, round_id, hash, odds |
 | `count_update` | Count changes | `{vehicle_count: N}` |
 | `verification` | Round ends | server_seed, result, bet_outcomes, verification_string |
-
-### /api/round Response by Phase
-
-**BETTING (15s):**
-```json
-{
-  "phase": "BETTING",
-  "round_id": 1234,
-  "stream_name": "Abbey Road London",
-  "phase_timer": 12.0,
-  "round_timer": 53.0,
-  "commitment_hash": "e4d2f1a8b3c7d9e5f6a2b4c8...",
-  "vehicle_count": 0,
-  "boundaries": {
-    "under": 14, "range_low": 20, "range_high": 21,
-    "over": 28, "exact_1": 20, "exact_2": 21
-  },
-  "odds": {"under": 3.13, "range": 2.35, "over": 3.76, "exact": 18.8},
-  "win_chances": {"under": 30, "range": 40, "over": 25, "exact": 5}
-}
-```
-
-**COUNTING (35s):** Above + live `vehicle_count`, `elapsed`, `remaining`
-
-**WAITING (6s):** Above + `server_seed`, `result`, `bet_outcomes`
 
 ---
 
@@ -281,8 +302,8 @@ LiveKit is optional. Without it, MJPEG streaming works as before. The frontend a
       "start": "08:00",
       "end": "12:00",
       "streams": [
-        {"name": "Stream_1", "url": "https://www.youtube.com/live/..."},
-        {"name": "Stream_2", "url": "https://example.com/stream.m3u8"}
+        {"name": "Stream 7", "url": "https://www.youtube.com/live/..."},
+        {"name": "Stream 16", "url": "https://www.youtube.com/live/..."}
       ]
     }
   ]
@@ -301,18 +322,37 @@ Time slots are in **IST** (UTC+5:30). Streams rotate round-robin within the acti
 }
 ```
 
-Draw lines/ROI using --gui mode. Configs auto-save and hot-reload during processing.
+Draw lines/ROI using `--gui` mode. Configs auto-save and hot-reload during processing.
 
 ### bytetrack.yaml
 
 ```yaml
 tracker_type: bytetrack
-track_high_thresh: 0.25    # Low-conf jittery detections excluded from primary matching
-track_low_thresh: 0.10     # Extremely noisy detections ignored (matches YOLO conf floor)
-new_track_thresh: 0.15     # Minimum confidence to create new track (catches side-angle vehicles)
-track_buffer: 150           # 5 seconds at 30fps — survives occlusion behind poles/pillars
-match_thresh: 0.65          # Relaxed for better re-association after occlusion
+track_high_thresh: 0.20    # Detections above this enter primary matching
+track_low_thresh: 0.05     # Rescue even weak detections for existing tracks
+new_track_thresh: 0.15     # Min confidence to create new track
+track_buffer: 180          # 6 sec at 30fps -- survives pole/pillar occlusion
+match_thresh: 0.60         # Relaxed for better re-association after occlusion
 fuse_score: true
+```
+
+---
+
+## YouTube URL Management
+
+### Anti-429 Rate Limiting
+
+- YouTube URLs pre-warmed at startup using yt-dlp Python API (no subprocess)
+- Browser cookies used automatically (Chrome/Edge/Firefox)
+- Optional `cookies.txt` file in project root for manual cookie export
+- URLs cached for 5 hours (YouTube live URLs valid ~6 hours)
+- Background refresh thread runs every 4 hours
+- Exponential backoff on 429 errors: 10s -> 30s -> 60s -> 120s -> 300s max
+
+### Manual Cookie Export (if auto-detect fails)
+
+```bash
+python -m yt_dlp --cookies-from-browser chrome --cookies cookies.txt "https://www.youtube.com"
 ```
 
 ---
@@ -337,208 +377,93 @@ Opens a debug GUI window showing real-time YOLO background processing:
 | Right-click x4 | Draw ROI polygon (4 corners) |
 | Middle-click | Cancel in-progress polygon |
 
-Line/ROI saves immediately to line_configs/ and hot-reloads for the next clip.
-Debug window always renders at 1280x720. Mouse coordinates are auto-converted to original frame resolution when saving.
+Debug window renders at 1280x720. Mouse coordinates auto-converted to original frame resolution.
 
 ---
 
-## Pipeline Details
+## Custom Model Training
 
-### Parallel Download + Single YOLO Worker (Smart Throttling)
+Train a smaller, faster YOLO model on your CCTV footage using knowledge distillation.
+See `model_training/README.md` for full guide.
 
+```bash
+# Quick overview (7 steps):
+python model_training/extract_frames.py          # Extract frames
+python model_training/auto_label.py              # Auto-label with teacher
+python model_training/verify_labels.py           # Visual QA (optional)
+model_training\train.bat                         # Train student model
+model_training\export_engine.bat                 # Export TensorRT
+python model_training/deploy.py                  # Deploy
+python scheduler.py --model cctv_yolo11n.engine  # Test
 ```
-StreamDownloader threads (parallel, CPU only):
-  - Each stream has its own download thread
-  - ffmpeg -c copy (no re-encoding, zero CPU waste)
-  - Quality check: blur, brightness validation
-  - SMART THROTTLE: download_queue maintained at exactly 3 clips
-    → All downloaders pause when queue has 3+ clips
-    → Resume when YOLO consumes and queue drops below 3
-    → Prevents YouTube 429 rate-limit spam
-  - YouTube 429 exponential backoff: 10s → 30s → 60s → 120s → 300s max
-  - URL cache: 4 hours (YouTube live URLs valid ~6 hours)
-
-YOLOWorker thread (single, GPU-safe):
-  - Picks clips from shared download_queue (target: 3 clips)
-  - Runs offline_count() with same model/tracker as production
-  - Validates count >= MIN_VEHICLE_COUNT (5)
-  - Approved clips go to ready_queue (max 10)
-  - Thread-safe: only one thread calls model.track()
-
-Scheduler (main thread):
-  - Cold start: waits for 5 processed clips before first round
-  - Non-blocking clip polling (never freezes GUI)
-  - Picks from ANY stream (fastest wins)
-  - Time slot management with IST-based rotation
-```
-
-### Download Throttling Flow
-
-```
-STARTUP: download_queue empty → downloaders active → 3 clips download
-         download_queue: 3 → ALL downloaders SLEEP
-
-STEADY:  YOLO picks 1 → queue: 2 → 1 downloader wakes → downloads 1 → queue: 3
-         YOLO picks 1 → queue: 2 → download 1 → queue: 3
-         ...
-
-         YouTube yt-dlp calls: max 1 every 40-86 sec (matches YOLO speed)
-         429 errors: eliminated
-```
-
-### Why Pre-Processing?
-Real-time YOLO during playback: 80ms/frame > 40ms budget = frame skip + stutter.
-Pre-processing in background: playback uses stored detections = ~6ms/frame = smooth.
 
 ---
 
 ## Provably Fair System
 
-Uses a **commitment scheme** — the only correct approach for real-world event games where the result (vehicle count) is a physical measurement, not seed-derived.
-
-### Why Commitment Scheme (Not Seed Derivation)
-
-Traditional provably fair derives results from seeds: `result = HMAC(server_seed, client_seed:nonce)`.
-This game's result is a **real vehicle count** — no algorithm can derive it. The commitment proves the result was locked before betting opened, identical to how live dealer casinos prove card draws.
+Uses a **commitment scheme** -- the only correct approach for real-world event games where the result (vehicle count) is a physical measurement, not seed-derived.
 
 ### Commitment Contents
 
 ```
 commitment_hash = SHA-256(
-    server_seed         64-char hex, cryptographically random per round
-    + ":" +
-    result              vehicle count (integer)
-    + ":" +
-    under               Under boundary number
-    + ":" +
-    range_low           Range lower boundary
-    + ":" +
-    range_high          Range upper boundary
-    + ":" +
-    over                Over boundary number
-    + ":" +
-    exact_1             First exact number
-    + ":" +
-    exact_2             Second exact number
-    + ":" +
-    round_id            global nonce (auto-incrementing)
+    server_seed:result:under:range_low:range_high:over:exact_1:exact_2:round_id
 )
 ```
-
-`server_seed` prevents brute-force: vehicle counts are 0-50, trivially guessable without it. All boundary numbers are included to prove they weren't altered after seeing bets.
 
 ### Round Flow
 
 ```
 BEFORE BETTING:
-  1. YOLO processes clip → result = 7
+  1. YOLO processes clip -> result = 7
   2. server_seed = secrets.token_hex(32)
-  3. Boundaries generated from lambda_mean (historical average)
-  4. commitment_hash = SHA-256(server_seed:result:under:range_low:range_high:over:exact_1:exact_2:round_id)
+  3. Boundaries generated from lambda_mean
+  4. commitment_hash published
 
 BETTING (15s):
-  5. Published: commitment_hash, boundaries, multipliers, win_chances
-  6. NOT published: server_seed, result (hidden)
+  5. Players see: hash, boundaries, multipliers
+  6. Players don't see: server_seed, result
 
 COUNTING (35s):
   7. Video plays, count increases live
 
 WAITING (6s):
   8. REVEAL: server_seed + result
-  9. Player verification: recompute SHA-256 → must match commitment
+  9. Player verifies: recompute SHA-256 -> must match commitment
 ```
-
-### Client Seed
-
-Client seed does NOT affect the result (real-world event). It is:
-- Auto-generated on player session start (frontend)
-- Sent with bet placement to betting backend
-- Stored in round audit log for transparency
-- Player can change it anytime; applies from next round
 
 ### Verification Endpoint
 
-`GET /api/verify` returns all data needed for independent verification:
-```json
-{
-  "round_id": 42,
-  "server_seed": "a7f3b2c9d4e5f6...",
-  "result": 7,
-  "boundaries": {
-    "under": 14, "range_low": 20, "range_high": 21,
-    "over": 28, "exact_1": 20, "exact_2": 21
-  },
-  "commitment_hash": "e4d2f1a8b3c7...",
-  "verification_string": "a7f3b2c9...:7:14:20:21:28:20:21:42",
-  "bet_outcomes": {"under": false, "range": false, "over": false, "exact": false}
-}
-```
+`GET /api/verify` returns all data needed for independent verification.
 
 ---
 
 ## Odds Generation
 
 Odds = the **boundary numbers** for each bet option (change every round based on historical average).
-
 Multipliers and win chances are **CONSTANT** every round.
-
-### Terminology
 
 ```
 Odds (change every round):
   Under < 14  |  Range 16-18  |  Over > 22  |  Exact 20 or 21
-  ↑ these NUMBERS are the "odds"
 
-Multipliers (CONSTANT every round):
+Multipliers (CONSTANT):
   Under: 3.13x  |  Range: 2.35x  |  Over: 3.76x  |  Exact: 18.8x
 
-Win Chances (CONSTANT every round):
+Win Chances (CONSTANT):
   Under: 30%  |  Range: 40%  |  Over: 25%  |  Exact: 5%
 ```
 
-### Boundary Generation Formula
-
-Uses the stream's historical average vehicle count (lambda_mean):
+### Boundary Formula (lambda_mean = historical average count)
 
 ```python
-under      = floor(lambda_mean × 0.75 × adjust_factor) - 1
+under      = floor(lambda_mean * 0.75 * adjust_factor) - 1
 range_low  = round(lambda_mean - 0.5)
 range_high = round(lambda_mean + 0.8)
-over       = ceil(lambda_mean × 1.35 × adjust_factor) + 1
+over       = ceil(lambda_mean * 1.35 * adjust_factor) + 1
 exact_1    = round(lambda_mean)
 exact_2    = exact_1 + 1
 ```
-
-### Example (lambda_mean = 20)
-
-```
-under      = floor(20 × 0.75) - 1 = 14
-range_low  = round(19.5) = 20
-range_high = round(20.8) = 21
-over       = ceil(27) + 1 = 28
-exact_1    = 20
-exact_2    = 21
-
-Player sees:
-  Under < 14  |  Range 20-21  |  Over > 28  |  Exact 20 or 21
-
-Dead zones (no bet wins): 14-19 and 22-28
-  → If result falls here, house wins all main bets
-```
-
-### Winning Rules
-
-```
-Under: count < under            → Under wins
-Range: range_low ≤ count ≤ range_high  → Range wins
-Over:  count > over             → Over wins
-Exact: count == exact_1 or exact_2     → Exact wins
-Gap:   anything else            → House wins all main bets
-```
-
-### Default Odds (< 20 Rounds of History)
-
-When insufficient data exists, boundaries use default lambda_mean = 10.0.
 
 ---
 
@@ -549,8 +474,57 @@ When insufficient data exists, boundaries use default lambda_mean = 10.0.
 | Vehicle count | >= 5 | Approve / reject + retry |
 | Image blur | > 15 (Laplacian variance) | Reject |
 | Brightness | 10-250 (mean pixel value) | Reject |
-| Max retries per stream | 3 consecutive fails | Skip stream |
+| Clip duration | >= CLIP_DURATION - 3 sec | Reject if too short |
+| Max retries per stream | 5 consecutive fails | Skip stream, reset |
 | Download timeout | 90 seconds | Abort + retry |
+
+---
+
+## CLI Reference
+
+### scheduler.py (Production)
+
+```bash
+python scheduler.py --config streams_config.json
+python scheduler.py --config streams_config.json --gui
+python scheduler.py --config streams_config.json --model yolo11x.pt --imgsz 1600
+python scheduler.py --web-port 8080
+python scheduler.py --test
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--config` | streams_config.json | Path to streams config |
+| `--model` | yolo11x.engine | YOLO model (.engine or .pt) |
+| `--imgsz` | 1248 | YOLO input resolution |
+| `--gui` | false | Enable debug GUI window |
+| `--web-port` | 5000 | FastAPI server port |
+| `--test` | false | Validate config and exit |
+
+### main.py (Testing)
+
+```bash
+python main.py --url "https://youtube.com/live/..."
+python main.py --video video1
+python main.py --video video1 --model yolo11x.engine --conf 0.15
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--url` | - | YouTube or stream URL |
+| `--video` | - | Local video file |
+| `--model` | yolo11x.engine | YOLO model |
+| `--conf` | 0.30 | Confidence threshold |
+| `--imgsz` | 1600 | Input resolution |
+| `--no-gui` | false | Headless mode |
+| `--web-port` | 5000 | Web server port |
+
+### network/download.py (Clip Download)
+
+```bash
+python network/download.py --url "YOUTUBE_URL" --name video1 --duration 300
+python network/download.py --list
+```
 
 ---
 
@@ -563,7 +537,7 @@ fastapi              # REST API + WebSocket server
 uvicorn[standard]    # ASGI server (httptools, websockets)
 numpy                # Array operations
 pydantic             # API data validation (bundled with FastAPI)
-yt-dlp               # YouTube URL resolution
+yt-dlp               # YouTube URL resolution (Python API + subprocess)
 livekit              # LiveKit Python SDK (WebRTC frame publishing)
 livekit-api          # LiveKit server API (token generation)
 torch + torchvision  # PyTorch with CUDA (cu121)
@@ -571,55 +545,28 @@ tensorrt-cu12        # TensorRT for GPU-optimized inference
 ```
 
 **Hardware:** NVIDIA GPU with CUDA required (tested on RTX 4060 Ti 8GB).
-**Recommended:** Node.js (LTS) — yt-dlp uses it for better YouTube parsing, significantly reduces 429 rate-limit errors.
-**Optional:** Docker Desktop for LiveKit server (native binary or MJPEG fallback works without it).
+**Optional:** Docker Desktop for LiveKit server (MJPEG fallback works without it).
 
 ---
 
-## CLI Reference
+## Performance (RTX 4060 Ti 8GB)
 
-### scheduler.py (Production)
+| Component | Time |
+|-----------|------|
+| YouTube URL resolve (cached) | 0 sec (pre-warmed) |
+| ffmpeg download (41s clip, NVENC 20fps) | ~45-50 sec |
+| YOLO processing (35s, 700 frames) | ~18-25 sec (TensorRT FP16) |
+| Quality check | < 1 sec |
+| Game round | 56 sec (15+35+6) |
+| GPU warmup (one-time at startup) | ~3 sec |
 
-```bash
-python scheduler.py --config streams_config.json                    # production (web only)
-python scheduler.py --config streams_config.json --gui              # development (web + debug GUI)
-python scheduler.py --config streams_config.json --web-port 8080    # custom port
-python scheduler.py --model yolo11x.pt                              # use PyTorch instead of TensorRT
-python scheduler.py --test                                          # validate config only
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--config` | streams_config.json | Path to streams config |
-| `--model` | yolo11x.engine | YOLO model (.engine or .pt) |
-| `--imgsz` | 1600 | YOLO input resolution |
-| `--gui` | false | Enable debug GUI window |
-| `--web-port` | 5000 | FastAPI server port |
-| `--test` | false | Validate config and exit |
-
-### main.py (Single Stream Testing)
+### GPU Optimization Tips
 
 ```bash
-python main.py --url "https://youtube.com/live/..."                 # live stream
-python main.py --video video1                                       # local video
-python main.py --video video1 --model yolo11m.pt --conf 0.15       # custom model
-python main.py --url URL --no-gui --web-port 5000                   # headless
-```
+# Lock GPU clocks for consistent performance
+nvidia-smi -lgc 2535
+nvidia-smi -pl 160
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--url` | - | YouTube or stream URL |
-| `--video` | - | Local video file name |
-| `--model` | yolo11m.pt | YOLO model |
-| `--conf` | 0.010 | Confidence threshold |
-| `--imgsz` | 1600 | Input resolution |
-| `--skip-frames` | 1 | Process every Nth frame |
-| `--no-gui` | false | Headless mode |
-| `--web-port` | 5000 | Web server port |
-
-### download.py (Test Clips)
-
-```bash
-python network/download.py --url URL --name video1 --duration 300   # download clip
-python network/download.py --list                                   # list saved videos
+# Monitor GPU during processing
+nvidia-smi dmon -s pucvmet -d 1
 ```

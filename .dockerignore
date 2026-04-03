@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+*.engine
+*.onnx
+*.pt
+videos/
+temp_clips/
+.env
+cookies.txt

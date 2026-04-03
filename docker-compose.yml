@@ -1,13 +1,63 @@
 version: "3.8"
 
 services:
+  # ── Main App (Python + YOLO + GPU) ──
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./streams_config.json:/app/streams_config.json
+      - ./line_configs:/app/line_configs
+      - ./cookies.txt:/app/cookies.txt
+      - ./livekit.yaml:/app/livekit.yaml
+    env_file: .env
+    depends_on:
+      - redis
+      - livekit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ── Redis (URL Cache) ──
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped
+
+  # ── LiveKit Server ──
   livekit:
     image: livekit/livekit-server:latest
     ports:
-      - "7880:7880"       # HTTP + WebSocket API
-      - "7881:7881"       # WebRTC TCP
-      - "7882:7882/udp"   # WebRTC UDP (media)
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
     volumes:
-      - ./livekit.yaml:/livekit.yaml
-    command: --config /livekit.yaml --dev
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    command: --config /etc/livekit.yaml
     restart: unless-stopped
+
+  # ── Cookie Refresher (Playwright) ──
+  cookie-refresher:
+    build:
+      context: .
+      dockerfile: Dockerfile.cookies
+    volumes:
+      - ./cookies.txt:/app/cookies.txt
+    environment:
+      - REFRESH_HOURS=72
+    restart: unless-stopped
+
+volumes:
+  redis-data:

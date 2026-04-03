@@ -20,11 +20,8 @@ env/
 Thumbs.db
 
 # Model weights (very large files)
-*.pt
-*.pth
-*.onnx
 *.engine
-
+*.onnx
 # LiveKit server binary
 livekit_server/
 
@@ -45,7 +42,7 @@ dist/
 .idea/
 
 # Environment variables
-.env
+
 
 /videos
 *.xlsx
