@@ -107,8 +107,8 @@ def prepare_round(clip: PreProcessedClip, round_id: int,
     stream_name = clip.stream_name
     result = clip.result
 
-    # Step 1: Generate odds — boundaries from historical lambda_mean
-    odds_data = generate_round_odds(history, stream_name)
+    # Step 1: Generate odds — boundaries from CURRENT result (random offset)
+    odds_data = generate_round_odds(result, history, stream_name)
     boundaries = odds_data["boundaries"]
 
     # Step 2: Generate provably fair data (commitment locks result + boundaries)
@@ -121,9 +121,8 @@ def prepare_round(clip: PreProcessedClip, round_id: int,
     # Step 3: Log round info
     print(
         f"[ODDS] Round #{round_id}: "
-        f"lambda_mean={odds_data['lambda_mean']} | "
-        f"data={odds_data['rounds_tracked']} rounds | "
-        f"enough_data={odds_data['has_enough_data']}"
+        f"result={result} | "
+        f"data={odds_data['rounds_tracked']} rounds"
     )
 
     # Step 4: Create immutable round data
@@ -144,8 +143,8 @@ def prepare_round(clip: PreProcessedClip, round_id: int,
         odds=odds_data["multipliers"],
         win_chances=odds_data["win_chances"],
         # Historical info
-        lambda_mean=odds_data["lambda_mean"],
-        has_enough_data=odds_data["has_enough_data"],
+        lambda_mean=float(result),
+        has_enough_data=True,
         rounds_tracked=odds_data["rounds_tracked"],
         # Phase
         phase="BETTING",

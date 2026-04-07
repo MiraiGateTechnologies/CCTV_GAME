@@ -352,11 +352,10 @@ class SequentialDownloader:
             "-i", download_url,
             "-t", str(CLIP_DURATION),
 
-            "-vf", "fps=20",   # ← force output to 20fps
-                               
-            "-c:v", "h264_nvenc",              # ← re-encode needed for fps change
-            "-preset", "p1",          # ← fastest encoding with gpu
-            "-cq", "28",
+            "-vf", "scale=960:-1,fps=18",   # ← force output to 20fps
+            "-c:v", "libx264",             # ← re-encode needed for fps change
+            "-preset", "ultrafast",          # ← fastest encoding with gpu
+            "-crf", "28",
             "-pix_fmt", "yuv420p",
             "-an",                    # ← quality (lower=better, 23=default)
             "-movflags", "+faststart",
@@ -421,16 +420,17 @@ class SequentialDownloader:
         cap.release()
         return True, "OK"
 
-    # ── Main Download Loop (SINGLE thread, round-robin) ──
+    # ── Main Download Loop (PARALLEL downloads, round-robin stream selection) ──
 
     def _download_loop(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         index = 0
 
         # Wait for URL prewarm to complete (max 120 sec, then start anyway)
         self._prewarm_done.wait(timeout=120)
 
         while self.is_running:
-            # No streams added yet → wait
+            # No streams added yet
             if not self.streams:
                 time.sleep(1)
                 continue
@@ -440,49 +440,76 @@ class SequentialDownloader:
                 time.sleep(5)
                 continue
 
-            # Pick next stream (round-robin)
-            stream = self.streams[index % len(self.streams)]
-            index += 1
-            name = stream["name"]
+            # How many clips needed to fill queue to target (max 3 parallel)
+            needed = DOWNLOAD_QUEUE_TARGET - self.download_queue.qsize()
+            needed = min(needed, 3, len(self.streams))
 
-            # Skip streams with too many consecutive failures (try again next rotation)
-            if self._failures.get(name, 0) >= 5:
-                self._failures[name] = 0  # reset after skipping one rotation
-                time.sleep(2)
-                continue
-
-            # Download
-            self.clip_counter += 1
-            safe_name = name.replace(' ', '_')
-            clip_path = os.path.join(self.temp_dir, f"{safe_name}_{self.clip_counter}.mp4")
-
-            if not self._download_clip(name, stream["url"], clip_path):
-                self._failures[name] = self._failures.get(name, 0) + 1
-                self.download_failures += 1
+            if needed <= 0:
                 time.sleep(3)
                 continue
 
-            # Reset failures on success
-            self._failures[name] = 0
-            self.clips_downloaded += 1
+            # Step 1: Pick streams and prepare paths (round-robin)
+            to_download = []
+            for _ in range(needed):
+                if not self.streams:
+                    break
 
-            # Quality check
-            quality_ok, reason = self._check_quality(clip_path)
-            if not quality_ok:
-                print(f"[DL] {name}: Quality rejected — {reason}")
-                self._safe_delete(clip_path)
-                self.clips_quality_rejected += 1
+                stream = self.streams[index % len(self.streams)]
+                index += 1
+                name = stream["name"]
+
+                # Skip streams with too many consecutive failures
+                if self._failures.get(name, 0) >= 5:
+                    self._failures[name] = 0
+                    continue
+
+                self.clip_counter += 1
+                safe_name = name.replace(' ', '_')
+                clip_path = os.path.join(self.temp_dir, f"{safe_name}_{self.clip_counter}.mp4")
+                to_download.append((stream, clip_path))
+
+            if not to_download:
+                time.sleep(3)
                 continue
 
-            # Push to download queue for YOLO processing
-            dl_clip = DownloadedClip(
-                clip_path=clip_path,
-                stream_name=name,
-                line_config_file=stream["config"],
-                imgsz=stream["imgsz"],
-                confidence=stream["conf"],
-            )
-            self.download_queue.put(dl_clip)
+            # Step 2: Download all in PARALLEL (uses existing _download_clip unchanged)
+            def _do_one(args):
+                stream, clip_path = args
+                success = self._download_clip(stream["name"], stream["url"], clip_path)
+                return (stream, clip_path, success)
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(_do_one, args) for args in to_download]
+                for future in as_completed(futures):
+                    stream, clip_path, success = future.result()
+                    name = stream["name"]
+
+                    if not success:
+                        self._failures[name] = self._failures.get(name, 0) + 1
+                        self.download_failures += 1
+                        continue
+
+                    # Reset failures on success
+                    self._failures[name] = 0
+                    self.clips_downloaded += 1
+
+                    # Quality check
+                    quality_ok, reason = self._check_quality(clip_path)
+                    if not quality_ok:
+                        print(f"[DL] {name}: Quality rejected — {reason}")
+                        self._safe_delete(clip_path)
+                        self.clips_quality_rejected += 1
+                        continue
+
+                    # Push to download queue for YOLO processing
+                    dl_clip = DownloadedClip(
+                        clip_path=clip_path,
+                        stream_name=name,
+                        line_config_file=stream["config"],
+                        imgsz=stream["imgsz"],
+                        confidence=stream["conf"],
+                    )
+                    self.download_queue.put(dl_clip)
 
     def _safe_delete(self, path: str):
         try:

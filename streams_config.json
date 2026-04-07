@@ -186,9 +186,6 @@
             "start": "16:00",
             "end": "20:00",
             "streams": [
-                { "name": "Stream 33", "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE" },
-                { "name": "Stream 34", "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB" },
-                { "name": "Stream 32", "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU" },
                 {
                     "name": "Stream 30",
                     "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1"
@@ -199,7 +196,7 @@
                 },
                 {
                     "name": "Stream 29",
-                    "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1"
+                    "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=bfbxyZ5aQN9nM7t3"
                 },
                 {
                     "name": "Stream 16",
@@ -208,10 +205,6 @@
                 {
                     "name": "Stream 17",
                     "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y"
-                },
-                {
-                    "name": "Stream 19",
-                    "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT"
                 },
                 {
                     "name": "Stream 21",
