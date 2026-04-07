@@ -182,201 +182,127 @@ class VehicleCounter:
     def process_detections(self, results, counting_active, vehicle_classes_dict, min_box_area, confidence_threshold):
         """Processes YOLO detections and updates tracking state.
 
-        Uses a persistent tracked_vehicles system:
-        - YOLO detects vehicle → update position + velocity
-        - YOLO misses vehicle → PREDICT position from velocity (dot stays visible)
-        - Dot NEVER disappears until vehicle leaves frame or unseen for 20 frames
+        Pure YOLO-based dots — no prediction, no ghost, no drift.
+        Dot shown ONLY when YOLO detects the vehicle in this frame.
+        tracked_vehicles used ONLY for: counted status inheritance when ByteTrack
+        assigns a new track_id to the same physical vehicle.
 
         Returns the set of (cx, cy) for dots to draw.
         """
         seen_in_roi_this_frame = set()
+        dots_to_draw = set()
         current_line = self.temp_line if self.temp_line else self.line
 
-        # ── Step 1: Process YOLO detections — update tracked_vehicles ──
-        detected_tids = set()
+        if results[0].boxes is None or results[0].boxes.id is None:
+            self.tracked_vehicles.clear()  # No detections = no dots
+            return dots_to_draw
 
-        if results[0].boxes is not None and results[0].boxes.id is not None:
-            boxes     = results[0].boxes.xyxy.cpu().numpy()
-            track_ids = results[0].boxes.id.cpu().numpy().astype(int)
-            classes   = results[0].boxes.cls.cpu().numpy().astype(int)
-            confs     = results[0].boxes.conf.cpu().numpy()
+        # Clear tracked_vehicles each frame — only THIS frame's detections get dots.
+        # Old entries caused "frozen dots" at previous positions when YOLO missed.
+        old_tracked = dict(self.tracked_vehicles)  # Save for inheritance lookup
+        self.tracked_vehicles.clear()
 
-            for box, track_id, cls, conf in zip(boxes, track_ids, classes, confs):
-                # Only filter by class — NOT by confidence
-                # ByteTrack already filtered via track_high/low_thresh
-                if cls not in vehicle_classes_dict:
-                    continue
+        boxes     = results[0].boxes.xyxy.cpu().numpy()
+        track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+        classes   = results[0].boxes.cls.cpu().numpy().astype(int)
+        confs     = results[0].boxes.conf.cpu().numpy()
 
-                x1, y1, x2, y2 = box.astype(int)
-                cx, cy = (x1+x2)//2, (y1+y2)//2
+        # Minimum confidence for showing a dot (filters YOLO false positives)
+        # ByteTrack tracks at 0.15+, but dots shown only at 0.20+
+        # This prevents random dots on trees/poles/shadows
+        MIN_DOT_CONF = 0.20
 
-                box_area = (x2 - x1) * (y2 - y1)
-                if box_area < min_box_area:
-                    continue
+        for box, track_id, cls, conf in zip(boxes, track_ids, classes, confs):
+            if cls not in vehicle_classes_dict:
+                continue
 
-                detected_tids.add(track_id)
+            x1, y1, x2, y2 = box.astype(int)
+            cx, cy = (x1+x2)//2, (y1+y2)//2
 
-                # Update or create tracked vehicle
-                if track_id in self.tracked_vehicles:
-                    tv = self.tracked_vehicles[track_id]
-                    # Compute velocity from position delta
-                    new_vx = cx - tv["cx"]
-                    new_vy = cy - tv["cy"]
-                    # Clamp velocity — CCTV vehicles never move >15px/frame
-                    # Without this, YOLO bbox jumps cause dots to fly randomly
-                    new_vx = max(-self.MAX_VELOCITY, min(self.MAX_VELOCITY, new_vx))
-                    new_vy = max(-self.MAX_VELOCITY, min(self.MAX_VELOCITY, new_vy))
-                    # Smooth velocity (prevents jitter without snake trail on position)
-                    tv["vx"] = 0.6 * new_vx + 0.4 * tv["vx"]
-                    tv["vy"] = 0.6 * new_vy + 0.4 * tv["vy"]
-                    tv["cx"] = cx   # position = raw (no lag, no snake)
-                    tv["cy"] = cy
-                    tv["missed"] = 0
-                else:
-                    # New vehicle — check if it matches a recently-lost tracked vehicle
-                    inherited = False
-                    for old_tid, old_tv in list(self.tracked_vehicles.items()):
-                        if old_tv["missed"] == 0:
-                            continue  # Still active, not lost
-                        dist = abs(cx - old_tv["cx"]) + abs(cy - old_tv["cy"])
-                        if dist < 40:
-                            # Inherit from lost vehicle (same physical vehicle, new track_id)
-                            self.tracked_vehicles[track_id] = {
-                                "cx": cx, "cy": cy,
-                                "vx": old_tv["vx"], "vy": old_tv["vy"],
-                                "missed": 0, "counted": old_tv["counted"],
-                            }
-                            # Inherit track history for line crossing detection
-                            if old_tid in self.track_history:
-                                self.track_history[track_id] = list(self.track_history[old_tid])
-                            if old_tv["counted"]:
-                                self.interval_counted_ids.add(track_id)
-                            # Remove old entry
-                            self.tracked_vehicles.pop(old_tid, None)
-                            inherited = True
+            box_area = (x2 - x1) * (y2 - y1)
+            if box_area < min_box_area:
+                continue
+
+            # ── Inherit counted status from previous frame's track (same vehicle, new ID) ──
+            if track_id not in old_tracked:
+                for old_tid, old_tv in old_tracked.items():
+                    dist = abs(cx - old_tv["cx"]) + abs(cy - old_tv["cy"])
+                    if dist < 40:
+                        if old_tv.get("counted", False):
+                            self.interval_counted_ids.add(track_id)
+                        if old_tid in self.track_history:
+                            self.track_history[track_id] = list(self.track_history[old_tid])
+                        break
+
+            # Update tracked_vehicles (position only, no velocity/prediction)
+            self.tracked_vehicles[track_id] = {
+                "cx": cx, "cy": cy,
+                "counted": track_id in self.interval_counted_ids,
+            }
+
+            # Update track history (for line crossing detection)
+            history = self.track_history[track_id]
+            history.append((cx, cy))
+            if len(history) > 30:
+                history.pop(0)
+
+            # ── Counting Line ──
+            if self.mode == "line" and track_id not in self.interval_counted_ids:
+                if current_line and len(current_line) == 2:
+                    A, B = current_line
+                    hist = self.track_history[track_id]
+                    crossed = False
+                    for i in range(max(0, len(hist) - 20), len(hist) - 1):
+                        p1, p2 = hist[i], hist[i + 1]
+                        if is_intersect(A, B, p1, p2):
+                            crossed = True
                             break
+                    if crossed and counting_active and not self._is_duplicate_crossing(cx, cy):
+                        self.interval_total += 1
+                        self.interval_class_counts[vehicle_classes_dict[cls]] += 1
+                        self.interval_counted_ids.add(track_id)
+                        self.tracked_vehicles[track_id]["counted"] = True
+                        self.flash_timers[track_id] = self.flash_frames
+                        box_half_flash = max(x2-x1, y2-y1) // 2 + 6
+                        # Store count_at for "+1" / "10!" popup display
+                        self.flash_positions[track_id] = (cx, cy, box_half_flash, self.interval_total)
 
-                    if not inherited:
-                        self.tracked_vehicles[track_id] = {
-                            "cx": cx, "cy": cy,
-                            "vx": 0.0, "vy": 0.0,
-                            "missed": 0, "counted": False,
-                        }
+            # ── ROI Mode — count on EXIT ──
+            elif self.mode == "roi" and self.roi_poly:
+                inside = point_in_polygon((cx, cy), self.roi_poly)
 
-                # Update track history (for line crossing detection)
-                history = self.track_history[track_id]
-                history.append((cx, cy))
-                if len(history) > 30:
-                    history.pop(0)
+                if track_id not in self.inside_roi_ids and track_id not in self.interval_counted_ids:
+                    dup_id = self._is_duplicate_footprint(x1, y1, x2, y2)
+                    if dup_id is not None:
+                        if dup_id in self.interval_counted_ids:
+                            self.interval_counted_ids.add(track_id)
+                        if dup_id in self.inside_roi_ids:
+                            self.inside_roi_ids.add(track_id)
 
-                # ── Counting Line ──
-                if self.mode == "line" and track_id not in self.interval_counted_ids:
-                    if current_line and len(current_line) == 2:
-                        A, B = current_line
-                        hist = self.track_history[track_id]
-                        crossed = False
-                        for i in range(max(0, len(hist) - 20), len(hist) - 1):
-                            p1, p2 = hist[i], hist[i + 1]
-                            if is_intersect(A, B, p1, p2):
-                                crossed = True
-                                break
-                        if crossed and counting_active and not self._is_duplicate_crossing(cx, cy):
+                if inside:
+                    seen_in_roi_this_frame.add(track_id)
+                    self.inside_roi_ids.add(track_id)
+                else:
+                    if track_id in self.inside_roi_ids and track_id not in self.interval_counted_ids:
+                        if counting_active and not self._is_duplicate_crossing(cx, cy):
                             self.interval_total += 1
                             self.interval_class_counts[vehicle_classes_dict[cls]] += 1
                             self.interval_counted_ids.add(track_id)
                             self.tracked_vehicles[track_id]["counted"] = True
                             self.flash_timers[track_id] = self.flash_frames
                             box_half_flash = max(x2-x1, y2-y1) // 2 + 6
-                            self.flash_positions[track_id] = (cx, cy, box_half_flash)
+                            self.flash_positions[track_id] = (cx, cy, box_half_flash, self.interval_total)
 
-                # ── ROI Mode — count on EXIT ──
-                elif self.mode == "roi" and self.roi_poly:
-                    inside = point_in_polygon((cx, cy), self.roi_poly)
+            self.prev_centers[track_id] = (cx, cy)
 
-                    if track_id not in self.inside_roi_ids and track_id not in self.interval_counted_ids:
-                        dup_id = self._is_duplicate_footprint(x1, y1, x2, y2)
-                        if dup_id is not None:
-                            if dup_id in self.interval_counted_ids:
-                                self.interval_counted_ids.add(track_id)
-                            if dup_id in self.inside_roi_ids:
-                                self.inside_roi_ids.add(track_id)
+            if track_id in self.inside_roi_ids or track_id in self.interval_counted_ids:
+                self.roi_track_boxes[track_id] = (x1, y1, x2, y2, time.time())
 
-                    if inside:
-                        seen_in_roi_this_frame.add(track_id)
-                        self.inside_roi_ids.add(track_id)
-                    else:
-                        if track_id in self.inside_roi_ids and track_id not in self.interval_counted_ids:
-                            if counting_active and not self._is_duplicate_crossing(cx, cy):
-                                self.interval_total += 1
-                                self.interval_class_counts[vehicle_classes_dict[cls]] += 1
-                                self.interval_counted_ids.add(track_id)
-                                self.tracked_vehicles[track_id]["counted"] = True
-                                self.flash_timers[track_id] = self.flash_frames
-                                box_half_flash = max(x2-x1, y2-y1) // 2 + 6
-                                self.flash_positions[track_id] = (cx, cy, box_half_flash)
-
-                self.prev_centers[track_id] = (cx, cy)
-
-                if track_id in self.inside_roi_ids or track_id in self.interval_counted_ids:
-                    self.roi_track_boxes[track_id] = (x1, y1, x2, y2, time.time())
-
-        # ── Step 2: Predict positions for UNDETECTED vehicles (dot stays visible) ──
-        frame_h = self.last_h or 1080
-        frame_w = self.last_w or 1920
-
-        for tid in list(self.tracked_vehicles.keys()):
-            if tid in detected_tids:
-                continue  # Already updated above
-
-            tv = self.tracked_vehicles[tid]
-            tv["missed"] += 1
-
-            # Only predict if velocity is meaningful (prevents stationary false dots)
-            speed = abs(tv["vx"]) + abs(tv["vy"])
-            if speed >= 1.0:
-                # Predict position using last known velocity
-                tv["cx"] += tv["vx"]
-                tv["cy"] += tv["vy"]
-                # Decay velocity quickly (vehicle likely stopping/occluded)
-                tv["vx"] *= 0.70
-                tv["vy"] *= 0.70
-
-            # Update track history with predicted position (for line crossing)
-            pcx, pcy = int(tv["cx"]), int(tv["cy"])
-            history = self.track_history[tid]
-            history.append((pcx, pcy))
-            if len(history) > 30:
-                history.pop(0)
-
-            # Check line crossing during prediction (vehicle might cross while occluded)
-            if self.mode == "line" and tid not in self.interval_counted_ids:
-                if current_line and len(current_line) == 2:
-                    A, B = current_line
-                    hist = self.track_history[tid]
-                    for i in range(max(0, len(hist) - 5), len(hist) - 1):
-                        if is_intersect(A, B, hist[i], hist[i + 1]):
-                            if counting_active and not self._is_duplicate_crossing(pcx, pcy):
-                                self.interval_total += 1
-                                self.interval_counted_ids.add(tid)
-                                tv["counted"] = True
-                                self.flash_timers[tid] = self.flash_frames
-                                self.flash_positions[tid] = (pcx, pcy, 20)
-                            break
-
-            # Remove immediately if outside frame (zero margin — no dots outside screen)
-            # OR if unseen for too long
-            if (tv["missed"] > self.MAX_PREDICT_FRAMES or
-                    tv["cx"] < 0 or tv["cx"] > frame_w or
-                    tv["cy"] < 0 or tv["cy"] > frame_h):
-                self.tracked_vehicles.pop(tid, None)
-                self.track_history.pop(tid, None)
-                continue
-
-        # ── Step 3: Build dots from tracked_vehicles (NOT from YOLO directly) ──
-        dots_to_draw = set()
-        for tid, tv in self.tracked_vehicles.items():
-            if tid not in self.interval_counted_ids and not tv.get("counted", False):
-                dots_to_draw.add((int(tv["cx"]), int(tv["cy"])))
+            # ── Dot: show ONLY for confident detected uncounted vehicles ──
+            # conf >= MIN_DOT_CONF prevents random dots on false positives
+            # Counting logic above still uses ALL detections (even low conf)
+            if track_id not in self.interval_counted_ids and conf >= MIN_DOT_CONF:
+                dots_to_draw.add((cx, cy))
 
         # Remove IDs that left ROI
         self.inside_roi_ids = self.inside_roi_ids.intersection(seen_in_roi_this_frame)
@@ -485,24 +411,34 @@ def offline_count(clip_path: str, line_config_file: str, model,
             # Last 6s: NO YOLO — raw frame only, count frozen
             results = None
             dots = set()
+            if frame_no == max_count_frames:
+                counter.tracked_vehicles.clear()
 
         new_count = counter.interval_total
 
-        # Store per-frame data from tracked_vehicles (NOT raw YOLO boxes)
-        # This ensures playback shows EXACTLY what debug mode shows:
-        # - Same dots (from tracked_vehicles, including predicted positions)
-        # - Same persistence (no flicker — predicted dots included)
-        # - Same counting status
+        # Store per-frame data — ONLY vehicles that had dots in debug mode.
+        # This guarantees playback shows EXACTLY the same dots as debug.
+        # Low-confidence false positives (conf < 0.20) are excluded.
         frame_dets = []
-        for tid, tv in counter.tracked_vehicles.items():
-            det = {
-                "track_id": int(tid),
-                "bbox": [int(tv["cx"]) - 20, int(tv["cy"]) - 15,
-                         int(tv["cx"]) + 20, int(tv["cy"]) + 15],
-                "counted": tv.get("counted", False) or tid in counter.interval_counted_ids,
-                "predicted": tv["missed"] > 0,  # True if position was predicted (not detected)
-            }
-            frame_dets.append(det)
+        if counting_active and results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
+            r_boxes = results[0].boxes.xyxy.cpu().numpy()
+            r_tids = results[0].boxes.id.cpu().numpy().astype(int)
+            r_confs = results[0].boxes.conf.cpu().numpy()
+            r_classes = results[0].boxes.cls.cpu().numpy().astype(int)
+            for r_box, r_tid, r_conf, r_cls in zip(r_boxes, r_tids, r_confs, r_classes):
+                if r_cls not in VEHICLE_CLASSES:
+                    continue
+                rx1, ry1, rx2, ry2 = r_box.astype(int).tolist()
+                is_counted = r_tid in counter.interval_counted_ids
+                # Only store if confident enough for dot display (matches debug mode)
+                show_dot = (not is_counted) and (r_conf >= 0.20)
+                det = {
+                    "track_id": int(r_tid),
+                    "bbox": [rx1, ry1, rx2, ry2],
+                    "counted": is_counted,
+                    "show_dot": show_dot,
+                }
+                frame_dets.append(det)
 
         if frame_dets:
             all_detections[frame_no] = frame_dets
@@ -519,7 +455,9 @@ def offline_count(clip_path: str, line_config_file: str, model,
         if counter.flash_positions:
             if frame_no not in all_detections:
                 all_detections[frame_no] = []
-            for tid, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
+            for tid, flash_data in list(counter.flash_positions.items()):
+                fcx, fcy, fbox_half = flash_data[0], flash_data[1], flash_data[2]
+                count_at = flash_data[3] if len(flash_data) > 3 else 0
                 t = counter.flash_timers.get(tid, 0)
                 if t > 0:
                     for det in all_detections.get(frame_no, []):
@@ -528,6 +466,7 @@ def offline_count(clip_path: str, line_config_file: str, model,
                             det["flash_cx"] = fcx
                             det["flash_cy"] = fcy
                             det["flash_half"] = fbox_half
+                            det["count_at"] = count_at
 
         # Debug visualization callback (--gui mode)
         if debug_callback is not None:
@@ -577,22 +516,37 @@ def render_debug_frame(frame, counter, results, counting_active,
         "roi_poly": list(counter.roi_poly) if counter.roi_poly else None,
     }
 
-    # ── Build dots from tracked_vehicles (SAME source as playback) ──
-    # This guarantees pixel-identical dots between debug and playback.
-    # tracked_vehicles contains both detected AND predicted positions.
+    # ── Build dots — use YOLO results directly with conf >= 0.20 filter ──
+    # Same filter as process_detections() dot logic — no random false positive dots.
+    # Identical to what gets stored for playback.
+    MIN_DOT_CONF = 0.20
     dots = []
-    for tid, tv in counter.tracked_vehicles.items():
-        if tid not in counter.interval_counted_ids and not tv.get("counted", False):
-            dots.append((int(tv["cx"]), int(tv["cy"])))
+    if results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
+        r_boxes = results[0].boxes.xyxy.cpu().numpy()
+        r_tids = results[0].boxes.id.cpu().numpy().astype(int)
+        r_confs = results[0].boxes.conf.cpu().numpy()
+        r_classes = results[0].boxes.cls.cpu().numpy().astype(int)
+        from core.counting import VEHICLE_CLASSES as _vc
+        for r_box, r_tid, r_conf, r_cls in zip(r_boxes, r_tids, r_confs, r_classes):
+            if r_cls not in _vc:
+                continue
+            if r_tid in counter.interval_counted_ids:
+                continue
+            if r_conf < MIN_DOT_CONF:
+                continue
+            rx1, ry1, rx2, ry2 = r_box.astype(int)
+            dots.append(((rx1+rx2)//2, (ry1+ry2)//2))
 
     # ── Build brackets list from counter flash state ──
     brackets = []
-    for tid, (fcx, fcy, fbox_half) in list(counter.flash_positions.items()):
+    for tid, flash_data in list(counter.flash_positions.items()):
+        fcx, fcy, fbox_half = flash_data[0], flash_data[1], flash_data[2]
+        count_at = flash_data[3] if len(flash_data) > 3 else 0
         t = counter.flash_timers.get(tid, 0)
         if t > 0:
             total = counter.flash_frames
             progress = (total - t) / total
-            brackets.append((fcx, fcy, fbox_half, progress))
+            brackets.append((fcx, fcy, fbox_half, progress, count_at))
 
     # ── Draw shared tracking overlay (identical to playback mode) ──
     draw_tracking_overlay(frame, dots, brackets, line_config)

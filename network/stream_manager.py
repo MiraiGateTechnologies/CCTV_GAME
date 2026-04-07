@@ -47,7 +47,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 CLIP_DURATION = 41            # Total clip length (35 counting + 6 waiting)
 COUNT_DURATION = 35           # Only count vehicles in first 35 seconds
-MIN_VEHICLE_COUNT = 5         # Minimum vehicles for a clip to be approved
+MIN_VEHICLE_COUNT = 0         # Minimum vehicles for a clip to be approved
 DOWNLOAD_TIMEOUT = 90         # Max seconds for ffmpeg download
 READY_QUEUE_MAX = 10           # Max pre-processed clips ready for rounds
 DOWNLOAD_QUEUE_MAX = 5        # Max downloaded-but-unprocessed clips waiting for YOLO
@@ -189,7 +189,14 @@ class SequentialDownloader:
                 'no_playlist': True,
                 'quiet': True,
                 'no_warnings': True,
-            }
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['default', 'android', 'web'],
+                        'formats': ['missing_pot'],
+        }
+    },
+}
+
 
             # Try browser cookies (Chrome → Edge → Firefox)
             # This prevents 429 — YouTube sees you as logged-in user
@@ -328,15 +335,30 @@ class SequentialDownloader:
         cmd = [
             "ffmpeg", "-y",
             "-loglevel", "error",
+            # Browser-like headers (prevents YouTube throttling)
+               "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/131.0.0.0 Safari/537.36\r\n"
+               "Referer: https://www.youtube.com/\r\n",
+            # Reconnection
             "-reconnect", "1",
             "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
+            "-reconnect_delay_max", "10",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "1",
+
+            # Timeout protection
+            "-rw_timeout", "10000000",
             "-i", download_url,
             "-t", str(CLIP_DURATION),
-            "-r", "20",                      # ← force output to 30fps
+
+            "-vf", "fps=20",   # ← force output to 20fps
+                               
             "-c:v", "h264_nvenc",              # ← re-encode needed for fps change
-            "-preset", "p1",          # ← fastest encoding (minimal CPU)
-            "-cq", "28",                    # ← quality (lower=better, 23=default)
+            "-preset", "p1",          # ← fastest encoding with gpu
+            "-cq", "28",
+            "-pix_fmt", "yuv420p",
+            "-an",                    # ← quality (lower=better, 23=default)
             "-movflags", "+faststart",
             output_path,
         ]

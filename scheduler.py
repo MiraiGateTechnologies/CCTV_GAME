@@ -269,8 +269,14 @@ def update_debug_window(pipeline: Pipeline) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  BETTING PHASE — 15 seconds, no stream
+#  BETTING PHASE — 15 seconds, animation video + circular timer
 # ═══════════════════════════════════════════════════════════════════
+
+# Betting animation video path
+BETTING_VIDEO_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "Earth Zoom [0rWZlvK2_DY].mp4"
+)
+
 
 def show_betting_phase(rd: RoundData, duration: float,
                        pipeline: Pipeline = None) -> bool:
@@ -290,34 +296,115 @@ def show_betting_phase(rd: RoundData, duration: float,
         exact_numbers=rd.exact_numbers,
     )
 
+    # Open betting animation video (10s video, freeze after it ends)
+    cap = None
+    last_video_frame = None
+    video_ended = False
+    if os.path.exists(BETTING_VIDEO_PATH):
+        cap = cv2.VideoCapture(BETTING_VIDEO_PATH)
+        if not cap.isOpened():
+            cap = None
+
     start = time.time()
     while True:
         elapsed = time.time() - start
         if elapsed >= duration:
             break
 
-        frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
-        for y_row in range(WINDOW_H):
-            val = int(15 + 12 * (y_row / WINDOW_H))
-            frame[y_row, :] = (val, val + 3, val + 8)
+        remaining = max(0, duration - elapsed)
 
-        cx = WINDOW_W // 2
-        remaining = int(duration - elapsed) + 1
+        # ── Get frame: video → frozen last frame → dark fallback ──
+        frame = None
 
-        # Just countdown timer — clean, no data
-        cv2.putText(frame, f"{remaining}", (cx - 30, WINDOW_H // 2 + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 255, 200), 4, cv2.LINE_AA)
+        if cap is not None and not video_ended:
+            ret, vframe = cap.read()
+            if ret:
+                # Fill screen without stretching (crop edges if needed)
+                vh, vw = vframe.shape[:2]
+                scale = max(WINDOW_W / vw, WINDOW_H / vh)
+                new_w, new_h = int(vw * scale), int(vh * scale)
+                resized = cv2.resize(vframe, (new_w, new_h))
+                x_off = (new_w - WINDOW_W) // 2
+                y_off = (new_h - WINDOW_H) // 2
+                frame = resized[y_off:y_off + WINDOW_H, x_off:x_off + WINDOW_W]
+                last_video_frame = frame.copy()
+            else:
+                # Video ended → freeze on last frame
+                video_ended = True
+
+        if video_ended and last_video_frame is not None:
+            frame = last_video_frame.copy()
+
+        if frame is None:
+            # Fallback: dark gradient (no video file)
+            frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
+            for y_row in range(WINDOW_H):
+                val = int(15 + 12 * (y_row / WINDOW_H))
+                frame[y_row, :] = (val, val + 3, val + 8)
+
+        # ── Stream name overlay (after video ends / frozen frame) ──
+        if video_ended:
+            name_text = rd.stream_name
+            t_size = cv2.getTextSize(name_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+            tx = (WINDOW_W - t_size[0]) // 2
+            ty = WINDOW_H // 2 + t_size[1] // 2
+
+            # Semi-transparent dark backdrop
+            overlay = frame.copy()
+            pad = 25
+            cv2.rectangle(overlay, (tx - pad, ty - t_size[1] - pad),
+                          (tx + t_size[0] + pad, ty + pad + 40), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+            # Stream name
+            cv2.putText(frame, name_text, (tx, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA)
+            # "NEXT STREAM" subtitle
+            sub_size = cv2.getTextSize("NEXT STREAM", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            cv2.putText(frame, "NEXT STREAM",
+                        (WINDOW_W // 2 - sub_size[0] // 2, ty + 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 180), 1, cv2.LINE_AA)
+
+        # ── Circular timer: top-right, yellow/gold, same size as counting/waiting ──
+        # Matches renderer.py: radius=20, thickness=3, margin=15
+        h, w = frame.shape[:2]
+        radius = 20
+        thickness = 3
+        margin = 15
+        center = (w - margin - radius, margin + radius)
+        ratio = remaining / duration if duration > 0 else 0
+        color = (0, 215, 255)  # Yellow/Gold (BGR)
+
+        # Background circle (dark) — same as counting/waiting
+        cv2.circle(frame, center, radius, (40, 40, 40), -1)
+
+        # Progress arc (clockwise from top) — same as counting/waiting
+        if ratio > 0:
+            angle = int(360 * ratio)
+            cv2.ellipse(frame, center, (radius, radius), -90, 0, angle,
+                        color, thickness, cv2.LINE_AA)
+
+        # Timer number in center — same style as count display
+        timer_text = str(int(remaining) + 1)
+        t_sz = cv2.getTextSize(timer_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+        cv2.putText(frame, timer_text,
+                    (center[0] - t_sz[0] // 2, center[1] + t_sz[1] // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+
         push_frame(frame)
 
         # CRITICAL: Always call cv2.waitKey to process Windows messages
-        # Without this → "NOT RESPONDING" error
         if debug_gui and pipeline:
             key = update_debug_window(pipeline)
         else:
             key = cv2.waitKey(30) & 0xFF
         if key == ord('q'):
+            if cap:
+                cap.release()
             return True
 
+    if cap:
+        cap.release()
     return False
 
 

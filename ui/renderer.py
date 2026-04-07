@@ -60,15 +60,16 @@ def draw_tracking_overlay(frame, dots, brackets, line_config):
     for (cx, cy) in dots:
         cv2.circle(frame, (int(cx), int(cy)), 4, (255, 255, 255), -1)
 
-    # ── 3. Green flash brackets (counted vehicle animation) ──
+    # ── 3. Green flash brackets + "+1" popup + "10!" checkpoint ──
     for item in brackets:
         fcx, fcy, fhalf, progress = int(item[0]), int(item[1]), int(item[2]), item[3]
+        count_at = int(item[4]) if len(item) > 4 else 0
         alpha = abs(math.sin(math.pi * progress))
         if alpha < 0.05:
             continue  # Skip nearly-invisible frame (prevents black bracket flash)
         color = (0, int(255 * alpha), 0)
-        size = 28
-        th = 3
+        size = 20
+        th = 2
         bx1, by1 = fcx - fhalf, fcy - fhalf
         bx2, by2 = fcx + fhalf, fcy + fhalf
 
@@ -90,6 +91,45 @@ def draw_tracking_overlay(frame, dots, brackets, line_config):
         cv2.line(frame, (bx1, by2), (bx1, by2 - size), color, th)
         cv2.line(frame, (bx2, by2), (bx2 - size, by2), color, th)
         cv2.line(frame, (bx2, by2), (bx2, by2 - size), color, th)
+
+        # ── "+1" popup / "10!" checkpoint — above the bracket ──
+        if count_at > 0 and alpha > 0.2:
+            # Float up effect: text moves up as animation progresses
+            float_offset = int(15 * progress)
+            popup_y = by1 - 10 - float_offset
+
+            if count_at % 10 == 0:
+                # ── CHECKPOINT: "10!" / "20!" / "30!" — golden, bigger ──
+                label = f"{count_at}!"
+                font_scale = 0.8
+                font_th = 2
+                text_color = (0, int(255 * alpha), int(255 * alpha))   # yellow-green
+                bg_color = (0, int(100 * alpha), int(100 * alpha))     # dark yellow-green
+            else:
+                # ── Normal: "+1" — green, smaller ──
+                label = "+1"
+                font_scale = 0.55
+                font_th = 2
+                text_color = (0, int(255 * alpha), 0)    # green
+                bg_color = None
+
+            t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_th)[0]
+            text_x = fcx - t_size[0] // 2
+            text_y = max(20, popup_y)
+
+            # Background pill for checkpoint
+            if bg_color is not None:
+                pad = 5
+                overlay_t = frame.copy()
+                cv2.rectangle(overlay_t,
+                              (text_x - pad, text_y - t_size[1] - pad),
+                              (text_x + t_size[0] + pad, text_y + pad),
+                              bg_color, -1)
+                cv2.addWeighted(overlay_t, 0.5 * alpha, frame, 1 - 0.5 * alpha, 0, frame)
+
+            cv2.putText(frame, label, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color,
+                        font_th, cv2.LINE_AA)
 
 
 def draw_dashboard(frame, counter, counting_active, elapsed, count_interval, wait_interval):
@@ -264,10 +304,9 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
 
     h, w = frame.shape[:2]
 
-    # ── Build dots from stored tracked_vehicles data ──
-    # Stored data already contains predicted positions + persistence from
-    # the tracked_vehicles system in counting.py. No ghost dots or EMA needed
-    # here — playback is an exact replay of what debug mode computed.
+    # ── Build dots from stored data — exact replay of debug mode ──
+    # show_dot flag was computed during offline_count using same conf >= 0.20 filter.
+    # Fallback: if show_dot not present (old data), use counted=False check.
     dots = []
     for det in detections:
         bbox = det.get("bbox", [0, 0, 0, 0])
@@ -275,8 +314,8 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         tid = det.get("track_id", 0)
 
-        # Show dot for UNCOUNTED vehicles only (identical to debug mode)
-        if not det.get("counted", False):
+        # Use show_dot flag (matches debug mode's conf >= 0.20 filter)
+        if det.get("show_dot", not det.get("counted", False)):
             dots.append((cx, cy))
 
         # If vehicle just crossed counting line → start green flash bracket
@@ -285,8 +324,9 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
                 flash_cx = det.get("flash_cx", cx)
                 flash_cy = det.get("flash_cy", cy)
                 flash_half = det.get("flash_half", max(x2 - x1, y2 - y1) // 2 + 6)
+                count_at = det.get("count_at", 0)
                 _playback_flash_timers[tid] = PLAYBACK_FLASH_FRAMES
-                _playback_flash_positions[tid] = (flash_cx, flash_cy, flash_half)
+                _playback_flash_positions[tid] = (flash_cx, flash_cy, flash_half, count_at)
 
     # ── Build brackets list from flash state ──
     brackets = []
@@ -297,9 +337,11 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
             _playback_flash_positions.pop(tid, None)
             continue
         if tid in _playback_flash_positions:
-            fcx, fcy, fhalf = _playback_flash_positions[tid]
+            flash_data = _playback_flash_positions[tid]
+            fcx, fcy, fhalf = flash_data[0], flash_data[1], flash_data[2]
+            count_at = flash_data[3] if len(flash_data) > 3 else 0
             progress = (PLAYBACK_FLASH_FRAMES - t) / PLAYBACK_FLASH_FRAMES
-            brackets.append((fcx, fcy, fhalf, progress))
+            brackets.append((fcx, fcy, fhalf, progress, count_at))
         _playback_flash_timers[tid] = t - 1
 
     # ── Draw shared tracking overlay (identical visuals as debug mode) ──

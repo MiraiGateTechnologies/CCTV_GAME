@@ -294,6 +294,20 @@ async def ws_game(ws: WebSocket):
     finally:
         _ws_manager.disconnect(ws)
 
+# NEW: Timer broadcast thread — pushes timer every 1 sec to all WebSocket clients
+def _start_timer_broadcast():
+    def _timer_loop():
+        while True:
+            time.sleep(1)
+            try:
+                from game.game_api import get_timer_update
+                data = get_timer_update()
+                _broadcast_sync(data)
+            except Exception:
+                pass
+    
+    t = threading.Thread(target=_timer_loop, daemon=True, name="WS-Timer")
+    t.start()
 
 # ═══════════════════════════════════════════════════════════════
 #  SERVER START — runs uvicorn in daemon thread
@@ -326,3 +340,5 @@ def start_server(port=5000, host="0.0.0.0"):
     print(f"[WEB] Game data:    http://localhost:{port}/api/round")
     print(f"[WEB] WebSocket:    ws://localhost:{port}/ws/game")
     print(f"[WEB] Verify:       http://localhost:{port}/api/verify")
+
+    _start_timer_broadcast()

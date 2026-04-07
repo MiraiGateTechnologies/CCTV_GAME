@@ -296,26 +296,58 @@ def get_api_response() -> dict:
         timers = _calculate_timers()
         phase = _state["phase"]
 
+        raw_id = _state["round_id"]
+        round_id_str = f"#RId{raw_id:07d}"
+
+        # IST datetime
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        created = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+        # Status: True when clip is playing (COUNTING or WAITING)
+        status = phase in ("COUNTING", "WAITING")
+        
+        # Betting status
+        betting_status = phase == "BETTING"
+
         resp = {
-            "phase": phase,
-            "round_id": _state["round_id"],
-            "stream_name": _state["stream_name"],
-            "phase_timer": timers["phase_timer"],
+            # 1. Odds (boundaries)
+            "odds": _state["boundaries"],
+            
+            # 2. Round timer (56 sec countdown) 
             "round_timer": timers["round_timer"],
-            "round_elapsed": timers["round_elapsed"],
-            "commitment_hash": _state["commitment_hash"],
+            
+            # 3. Unique round ID
+            "round_id": round_id_str,
+            
+            # 4. Created datetime (IST)
+            "created": created,
+            
+            # 5. Status (clip playing?)
+            "status": status,
+            
+            # 6. Waiting timer (6 sec, only during WAITING)
+            "waiting_timer": timers["phase_timer"] if phase == "WAITING" else 0,
+            
+            # 7. Vehicle count
             "vehicle_count": _state["vehicle_count"],
+            
+            # 8. Result (final count, revealed in WAITING)
+            "result": _state["result"] if phase == "WAITING" else None,
+            
+            # 9. Betting status
+            "betting_status": betting_status,
+            
+            # 10. Betting timer (15 sec, only during BETTING)
+            "betting_timer": timers["phase_timer"] if phase == "BETTING" else 0,
+            
+            "phase": phase,
+            "commitment_hash": _state["commitment_hash"],
+
+            # Extra fields (revealed during WAITING only)
+            "server_seed": _state["server_seed"] if phase == "WAITING" else None,
+            "bet_outcomes": _state["bet_outcomes"] if phase == "WAITING" else None,
         }
-
-        # Boundaries, multipliers, thresholds visible during all active phases
-        if phase in ("BETTING", "COUNTING", "WAITING"):
-            resp["odds"] = _state["boundaries"]
-
-        # Server seed + result revealed only during WAITING
-        if phase == "WAITING":
-            resp["server_seed"] = _state["server_seed"]
-            resp["result"] = _state["result"]
-            resp["bet_outcomes"] = _state["bet_outcomes"]
 
         return resp
 
@@ -340,4 +372,20 @@ def get_overlay_data() -> dict:
             "under_threshold": _state["under_threshold"],
             "over_threshold": _state["over_threshold"],
             "exact_numbers": _state["exact_numbers"],
+        }
+
+        
+def get_timer_update() -> dict:
+    """Lightweight timer data for WebSocket push every 1 sec."""
+    with _lock:
+        timers = _calculate_timers()
+        phase = _state["phase"]
+        return {
+            "type": "timer_update",
+            "data": {
+                "round_timer": timers["round_timer"],
+                "betting_timer": timers["phase_timer"] if phase == "BETTING" else 0,
+                "waiting_timer": timers["phase_timer"] if phase == "WAITING" else 0,
+                "phase": phase,
+            }
         }

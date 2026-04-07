@@ -22,11 +22,12 @@ Thumbs.db
 # Model weights (very large files)
 *.engine
 *.onnx
+*.pt
 # LiveKit server binary
 livekit_server/
 
 # Runtime generated data
-
+/runs
 
 # Temporary files
 *.tmp

@@ -1,14 +1,57 @@
 {
     "_CHANGE_GUIDE": {
-        "count_duration": "Har stream pe kitne seconds count karo (default: 35)",
-        "transition_duration": "Globe animation kitne seconds chale streams ke beech (default: 15)",
         "time_slots": "IST time ke hisaab se streams — start/end HH:MM format mein",
         "streams": "Har slot mein multiple streams — round-robin mein cycle hote hain",
         "name": "Stream ka display naam (koi bhi rakh sakte ho)",
         "url": "YouTube live stream URL ya direct RTSP/HLS URL"
     },
-    "count_duration": 35,
-    "transition_duration": 15,
+    "all_streams": [
+        { "name": "Stream 1", "url": "https://www.youtube.com/live/l6EvTvOa1wc?si=h3-D2KHt6P2ZqRoK" },
+        { "name": "Stream 2", "url": "https://www.youtube.com/live/JACr5CpjS_Q?si=0miQ7Kfc1wGvOudF" },
+        { "name": "Stream 3", "url": "https://wzmedia.dot.ca.gov/D7/CCTV-268.stream/playlist.m3u8" },
+        { "name": "Stream 4", "url": "https://wzmedia.dot.ca.gov/D11/C187_SB_5_at_Via_De_La_Valle.stream/playlist.m3u8" },
+        { "name": "Stream 5", "url": "https://wzmedia.dot.ca.gov/D11/C516_SB_5_NO_Manchester_T.stream/playlist.m3u8" },
+        { "name": "Stream 6", "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt" },
+        { "name": "Stream 7", "url": "https://www.youtube.com/live/TSHqQy-ugQk?si=UgCg847i8olIC_I4" },
+        { "name": "Stream 8", "url": "https://www.youtube.com/watch?v=EXAMPLE3" },
+        { "name": "Stream 9", "url": "https://www.youtube.com/watch?v=EXAMPLE4" },
+        { "name": "Stream 16", "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5" },
+        { "name": "Stream 17", "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y" },
+        { "name": "Stream 19", "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT" },
+        { "name": "Stream 21", "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl" },
+        { "name": "Stream 23", "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI" },
+        { "name": "Stream 27", "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S" },
+        { "name": "Stream 28", "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ" },
+        { "name": "Stream 29", "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1" },
+        { "name": "Stream 30", "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1" },
+        { "name": "Stream 31", "url": "https://www.youtube.com/live/AWVVYHfxZac?si=SYf6IiLEUJr3fZF-" },
+        { "name": "Stream 32", "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU" },
+        { "name": "Stream 33", "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE" },
+        { "name": "Stream 34", "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB" },
+        { "name": "Stream 35", "url": "https://www.youtube.com/live/Jy86Iduy0X8?si=YInW0EHmaXtj5sAa" },
+        { "name": "Stream 36", "url": "https://www.youtube.com/live/AShvF9ILGkc?si=krlXWd8zhdykJeLd" },
+        { "name": "Stream 37", "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A" },
+        { "name": "Stream 38", "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0" },
+        { "name": "Stream 39", "url": "https://www.youtube.com/live/1xl0hX-nF2E?si=Jslnzl0yMy9N-q23" },
+        { "name": "Stream 40", "url": "https://www.youtube.com/live/dk5gL33BqxM?si=0dyKo11Ud7iufx4a" },
+        { "name": "Stream 41", "url": "https://www.youtube.com/live/R3nGpwWDAHg?si=dmv-A7MDF-monU89" },
+        { "name": "Stream 42", "url": "https://www.youtube.com/live/SH63YaIWyK0?si=J_-lhwCCnDAYoZ5z" },
+        { "name": "Stream 43", "url": "https://www.youtube.com/live/WY2t935xDqM?si=aKJKt4NaGo1UzOGE" },
+        { "name": "Stream 44", "url": "https://www.youtube.com/live/auWahQLydIk?si=KPjQE2FYqIJktzpa" },
+        { "name": "Stream 45", "url": "https://www.youtube.com/live/ZyW1tTwBDeg?si=gTdoVjYHKVgYYPyD" },
+        { "name": "Stream 46", "url": "https://www.youtube.com/live/UWkwZ2hj84I?si=10SMFb-SSAHuufGP" },
+        { "name": "Stream 47", "url": "https://www.youtube.com/live/H8bFFw-0ZQE?si=ODd5QFWNDG2elbh7" },
+        { "name": "Stream 48", "url": "https://www.youtube.com/live/sw8MuxrKcs8?si=r8m3gpi9506gSkFQ" },
+        { "name": "Stream 49", "url": "https://www.youtube.com/live/DnUFAShZKus?si=t5lZpbceuh8Kzl8u" },
+        { "name": "Stream 50", "url": "https://www.youtube.com/live/LL6HrtRsR3o?si=YmLR0kxGI8Rua4Ac" },
+        { "name": "Stream 51", "url": "https://www.youtube.com/live/Zz9hMrxl20I?si=FhTcsP6afHiR7PsX" },
+        { "name": "Stream 52", "url": "https://www.youtube.com/live/nNK_Ks6XAfU?si=GY7onSQcoYXyCUid" },
+        { "name": "Stream 53", "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=J2v0WxuSXoqgRKzR" },
+        { "name": "Stream 54", "url": "https://www.youtube.com/live/8-V9uEqFLwE?si=aNIEm3C82oYHhCAA" },
+        { "name": "Stream 55", "url": "https://www.youtube.com/live/4lN2PQEDtfY?si=41tWnUlYC358eU7s" },
+        { "name": "Stream 56", "url": "https://www.youtube.com/live/-MWn7E2O-_o?si=JbOLCj3RD43Vpjc1" }
+    ],
+
     "time_slots": [
         {
             "start": "00:00",
@@ -104,6 +147,11 @@
             "start": "12:00",
             "end": "16:00",
             "streams": [
+                
+                {
+                    "name": "Stream 30",
+                    "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1"
+                },
                 {
                     "name": "Stream 16",
                     "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5"
@@ -138,6 +186,9 @@
             "start": "16:00",
             "end": "20:00",
             "streams": [
+                { "name": "Stream 33", "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE" },
+                { "name": "Stream 34", "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB" },
+                { "name": "Stream 32", "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU" },
                 {
                     "name": "Stream 30",
                     "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1"
