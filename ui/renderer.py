@@ -347,9 +347,67 @@ def draw_playback_overlay(frame, frame_no: int, current_count: int,
     # ── Draw shared tracking overlay (identical visuals as debug mode) ──
     draw_tracking_overlay(frame, dots, brackets, line_config)
 
-    # ── Dashboard overlay (game data from game_api) ──
+    # ── Odds bar (top-middle, boundaries only — shown during COUNTING + WAITING) ──
     from game.game_api import get_overlay_data
     gd = get_overlay_data()
+    boundaries = gd.get("boundaries", {})
+    phase = gd.get("phase", "")
+
+    if boundaries and phase in ("COUNTING", "WAITING"):
+        bar_w = min(460, w - 100)
+        bar_h = 28
+        bar_x = (w - bar_w) // 2
+        bar_y = 8
+        col_w = bar_w // 4
+
+        # Semi-transparent dark background
+        ov = frame.copy()
+        cv2.rectangle(ov, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (0, 0, 0), -1)
+        cv2.addWeighted(ov, 0.55, frame, 0.45, 0, frame)
+
+        # Determine winner during WAITING phase
+        winner_idx = -1
+        if phase == "WAITING":
+            result = gd.get("vehicle_count", 0)
+            u = boundaries.get("under", 0)
+            rl = boundaries.get("range_low", 0)
+            rh = boundaries.get("range_high", 0)
+            ov_t = boundaries.get("over", 0)
+            e1 = boundaries.get("exact_1", 0)
+            e2 = boundaries.get("exact_2", 0)
+
+            if result < u:
+                winner_idx = 0
+            elif rl <= result <= rh:
+                winner_idx = 1
+            elif result > ov_t:
+                winner_idx = 2
+            if result in (e1, e2):
+                winner_idx = 3
+
+            # Green highlight on winning column
+            if winner_idx >= 0:
+                hx = bar_x + winner_idx * col_w
+                ov2 = frame.copy()
+                cv2.rectangle(ov2, (hx, bar_y), (hx + col_w, bar_y + bar_h), (0, 120, 0), -1)
+                cv2.addWeighted(ov2, 0.4, frame, 0.6, 0, frame)
+
+        # 4 columns: Under | Range | Over | Exact
+        cols = [
+            f"U<{boundaries.get('under', '?')}",
+            f"R {boundaries.get('range_low', '?')}-{boundaries.get('range_high', '?')}",
+            f"O>{boundaries.get('over', '?')}",
+            f"E {boundaries.get('exact_1', '?')}|{boundaries.get('exact_2', '?')}",
+        ]
+        for i, text in enumerate(cols):
+            cx = bar_x + i * col_w + col_w // 2
+            ty = bar_y + bar_h // 2 + 5
+            clr = (0, 255, 100) if i == winner_idx else (220, 220, 220)
+            ts = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+            cv2.putText(frame, text, (cx - ts[0] // 2, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, clr, 1, cv2.LINE_AA)
+
+    # ── Circular timer (top-right) ──
     radius = 20
     thickness = 3
     margin = 15
