@@ -47,11 +47,11 @@ except ImportError:
 # ─────────────────────────────────────────────
 CLIP_DURATION = 41            # Total clip length (35 counting + 6 waiting)
 COUNT_DURATION = 35           # Only count vehicles in first 35 seconds
-MIN_VEHICLE_COUNT = 0         # Minimum vehicles for a clip to be approved
+MIN_VEHICLE_COUNT = 5         # Minimum vehicles for a clip to be approved
 DOWNLOAD_TIMEOUT = 90         # Max seconds for ffmpeg download
 READY_QUEUE_MAX = 10           # Max pre-processed clips ready for rounds
-DOWNLOAD_QUEUE_MAX = 5        # Max downloaded-but-unprocessed clips waiting for YOLO
-DOWNLOAD_QUEUE_TARGET = 3     # Keep exactly 3 clips in download queue
+DOWNLOAD_QUEUE_MAX = 6        # Max downloaded-but-unprocessed clips waiting for YOLO
+DOWNLOAD_QUEUE_TARGET = 6     # Keep exactly 3 clips in download queue
 MAX_PENDING_PER_STREAM = 2    # Max unprocessed clips per stream (throttle fast streams)
 YT_URL_CACHE_TTL = 5 * 3600  # Refresh YouTube URLs every 5 hours (live URLs valid ~6h)
 YT_URL_REFRESH_INTERVAL = 4 * 3600  # Background refresh every 4 hours
@@ -65,12 +65,15 @@ class DownloadedClip:
     """A clip downloaded and quality-checked, waiting for YOLO processing."""
 
     def __init__(self, clip_path: str, stream_name: str,
-                 line_config_file: str, imgsz: int, confidence: float):
+                 line_config_file: str, imgsz: int, confidence: float,
+                 animation_video: str = "", thumbnail: str = ""):
         self.clip_path = clip_path
         self.stream_name = stream_name
         self.line_config_file = line_config_file
         self.imgsz = imgsz
         self.confidence = confidence
+        self.animation_video = animation_video
+        self.thumbnail = thumbnail
         self.downloaded_at = time.time()
 
 
@@ -79,7 +82,8 @@ class PreProcessedClip:
 
     def __init__(self, clip_path: str, stream_name: str, result: int,
                  detections: dict, counting_events: list,
-                 total_frames: int, clip_fps: float):
+                 total_frames: int, clip_fps: float,
+                 animation_video: str = "", thumbnail: str = ""):
         self.clip_path = clip_path
         self.stream_name = stream_name
         self.result = result
@@ -87,6 +91,8 @@ class PreProcessedClip:
         self.counting_events = counting_events
         self.total_frames = total_frames
         self.clip_fps = clip_fps
+        self.animation_video = animation_video
+        self.thumbnail = thumbnail
         self.processed_at = time.time()
 
 
@@ -140,7 +146,8 @@ class SequentialDownloader:
         self._start_url_refresh_thread()
 
     def add_stream(self, name: str, url: str, config_path: str,
-                   imgsz: int = 1600, confidence: float = 0.10):
+                   imgsz: int = 1600, confidence: float = 0.10,
+                   animation_video: str = "", thumbnail: str = ""):
         """Add a stream to the round-robin rotation."""
         # Don't add duplicates
         for s in self.streams:
@@ -149,6 +156,7 @@ class SequentialDownloader:
         self.streams.append({
             "name": name, "url": url, "config": config_path,
             "imgsz": imgsz, "conf": confidence,
+            "animation": animation_video, "thumbnail": thumbnail,
         })
         self._failures[name] = 0
 
@@ -436,13 +444,12 @@ class SequentialDownloader:
                 continue
 
             # Queue full → wait for YOLO to consume
-            if self.download_queue.qsize() >= DOWNLOAD_QUEUE_TARGET:
-                time.sleep(5)
+            if self.download_queue.qsize() > 3:
+                time.sleep(3)
                 continue
 
             # How many clips needed to fill queue to target (max 3 parallel)
-            needed = DOWNLOAD_QUEUE_TARGET - self.download_queue.qsize()
-            needed = min(needed, 3, len(self.streams))
+            needed = 3
 
             if needed <= 0:
                 time.sleep(3)
@@ -508,6 +515,8 @@ class SequentialDownloader:
                         line_config_file=stream["config"],
                         imgsz=stream["imgsz"],
                         confidence=stream["conf"],
+                        animation_video=stream.get("animation", ""),
+                        thumbnail=stream.get("thumbnail", ""),
                     )
                     self.download_queue.put(dl_clip)
 
@@ -643,6 +652,8 @@ class YOLOWorker:
                 counting_events=result["counting_events"],
                 total_frames=result["total_frames_processed"],
                 clip_fps=result["clip_fps"],
+                animation_video=dl_clip.animation_video,
+                thumbnail=dl_clip.thumbnail,
             )
             self.clips_approved += 1
             print(f"[YOLO] {dl_clip.stream_name}: APPROVED (count={count}) | "
@@ -713,13 +724,15 @@ class Pipeline:
 
     def add_stream(self, stream_name: str, stream_url: str,
                    line_config_file: str, imgsz: int = 1600,
-                   confidence: float = 0.10):
+                   confidence: float = 0.10,
+                   animation_video: str = "", thumbnail: str = ""):
         """Add a stream to the round-robin download rotation."""
         if stream_name in self.stream_names:
             return
 
         self.downloader.add_stream(stream_name, stream_url,
-                                   line_config_file, imgsz, confidence)
+                                   line_config_file, imgsz, confidence,
+                                   animation_video, thumbnail)
         self.stream_names.append(stream_name)
 
         print(f"[PIPELINE] Added stream: {stream_name} "

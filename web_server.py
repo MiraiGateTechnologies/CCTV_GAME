@@ -165,13 +165,13 @@ def index():
         return f.read()
 
 
-@app.get("/video_feed")
-def video_feed():
-    """MJPEG live video stream — <img src='/video_feed'> in browser."""
-    return StreamingResponse(
-        _generate_frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+# @app.get("/video_feed")
+# def video_feed():
+#     """MJPEG live video stream — <img src='/video_feed'> in browser."""
+#     return StreamingResponse(
+#         _generate_frames(),
+#         media_type="multipart/x-mixed-replace; boundary=frame",
+#     )
 
 
 @app.get("/api/round")

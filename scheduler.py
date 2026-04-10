@@ -272,10 +272,12 @@ def update_debug_window(pipeline: Pipeline) -> int:
 #  BETTING PHASE — 15 seconds, animation video + circular timer
 # ═══════════════════════════════════════════════════════════════════
 
-# Betting animation video path
-BETTING_VIDEO_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "Earth Zoom [0rWZlvK2_DY].mp4"
-)
+# Betting animation paths
+ANIMATION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "animation_videos")
+THUMBNAILS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumbnails")
+FALLBACK_VIDEO = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "Earth Zoom [0rWZlvK2_DY].mp4")
+THUMBNAIL_SHOW_AT = 3.0  # Show thumbnail after 3 seconds
 
 
 def show_betting_phase(rd: RoundData, duration: float,
@@ -286,7 +288,7 @@ def show_betting_phase(rd: RoundData, duration: float,
     rd.phase_start_time = time.time()
     web_server.update_game_state(get_betting_phase_data(rd))
 
-    # Update game_api — single source of truth for all data
+    # Update game_api
     game_api.update_phase(
         "BETTING", round_id=rd.round_id, stream_name=rd.stream_name,
         commitment_hash=rd.commitment_hash, boundaries=rd.boundaries,
@@ -296,16 +298,46 @@ def show_betting_phase(rd: RoundData, duration: float,
         exact_numbers=rd.exact_numbers,
     )
 
-    # Open betting animation video (10s video, freeze after it ends)
+    # ── Determine animation video (city-specific or fallback) ──
+    anim_file = getattr(rd.clip, 'animation_video', '') if rd.clip else ''
+    video_path = os.path.join(ANIMATION_DIR, anim_file) if anim_file else ""
+    if not video_path or not os.path.exists(video_path):
+        video_path = FALLBACK_VIDEO
+
+    # ── Load thumbnail image (city photo) ──
+    thumb_file = getattr(rd.clip, 'thumbnail', '') if rd.clip else ''
+    thumb_img = None
+    if thumb_file:
+        thumb_path = os.path.join(THUMBNAILS_DIR, thumb_file)
+        if os.path.exists(thumb_path):
+            raw = cv2.imread(thumb_path)
+            if raw is not None:
+                # Resize thumbnail to max 200x120, maintain aspect ratio
+                th, tw = raw.shape[:2]
+                scale = min(200 / tw, 120 / th)
+                new_tw, new_th = int(tw * scale), int(th * scale)
+                thumb_img = cv2.resize(raw, (new_tw, new_th))
+
+    # ── Open animation video (slow-motion: stretch to fill 15 sec) ──
     cap = None
     last_video_frame = None
     video_ended = False
-    if os.path.exists(BETTING_VIDEO_PATH):
-        cap = cv2.VideoCapture(BETTING_VIDEO_PATH)
-        if not cap.isOpened():
+    slow_frame_time = 0.033  # default ~30fps fallback
+
+    if os.path.exists(video_path):
+        cap = cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            vid_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames > 0 and vid_fps > 0:
+                # Slow-motion: spread all frames evenly across 'duration' seconds
+                slow_frame_time = duration / total_frames
+        else:
             cap = None
 
     start = time.time()
+    next_frame_at = start  # when to read next video frame
+
     while True:
         elapsed = time.time() - start
         if elapsed >= duration:
@@ -313,12 +345,20 @@ def show_betting_phase(rd: RoundData, duration: float,
 
         remaining = max(0, duration - elapsed)
 
-        # ── Get frame: video → frozen last frame → dark fallback ──
+        # ── Get frame: video (slow-motion paced) -> frozen -> dark fallback ──
         frame = None
 
         if cap is not None and not video_ended:
-            ret, vframe = cap.read()
-            if ret:
+            now = time.time()
+            if now >= next_frame_at:
+                ret, vframe = cap.read()
+                next_frame_at = now + slow_frame_time
+                if not ret:
+                    video_ended = True
+            else:
+                vframe = None
+
+            if vframe is not None:
                 # Fill screen without stretching (crop edges if needed)
                 vh, vw = vframe.shape[:2]
                 scale = max(WINDOW_W / vw, WINDOW_H / vh)
@@ -328,63 +368,94 @@ def show_betting_phase(rd: RoundData, duration: float,
                 y_off = (new_h - WINDOW_H) // 2
                 frame = resized[y_off:y_off + WINDOW_H, x_off:x_off + WINDOW_W]
                 last_video_frame = frame.copy()
-            else:
-                # Video ended → freeze on last frame
-                video_ended = True
+            elif last_video_frame is not None:
+                # Between slow-motion frames — show last frame (not ended)
+                frame = last_video_frame.copy()
 
         if video_ended and last_video_frame is not None:
             frame = last_video_frame.copy()
 
         if frame is None:
-            # Fallback: dark gradient (no video file)
             frame = np.zeros((WINDOW_H, WINDOW_W, 3), dtype=np.uint8)
             for y_row in range(WINDOW_H):
                 val = int(15 + 12 * (y_row / WINDOW_H))
                 frame[y_row, :] = (val, val + 3, val + 8)
 
-        # ── Stream name overlay (after video ends / frozen frame) ──
-        if video_ended:
+        # ── Thumbnail + stream name (appears after 3 sec, stays visible) ──
+        if elapsed >= THUMBNAIL_SHOW_AT:
             name_text = rd.stream_name
-            t_size = cv2.getTextSize(name_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
-            tx = (WINDOW_W - t_size[0]) // 2
-            ty = WINDOW_H // 2 + t_size[1] // 2
 
-            # Semi-transparent dark backdrop
-            overlay = frame.copy()
-            pad = 25
-            cv2.rectangle(overlay, (tx - pad, ty - t_size[1] - pad),
-                          (tx + t_size[0] + pad, ty + pad + 40), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+            if thumb_img is not None:
+                # Layout: thumbnail image + stream name + subtitle (all centered)
+                t_h, t_w = thumb_img.shape[:2]
+                name_size = cv2.getTextSize(name_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+                sub_size = cv2.getTextSize("NEXT STREAM", cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
 
-            # Stream name
-            cv2.putText(frame, name_text, (tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA)
-            # "NEXT STREAM" subtitle
-            sub_size = cv2.getTextSize("NEXT STREAM", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
-            cv2.putText(frame, "NEXT STREAM",
-                        (WINDOW_W // 2 - sub_size[0] // 2, ty + 35),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 180), 1, cv2.LINE_AA)
+                # Total block height: thumbnail + gap + name + gap + subtitle
+                block_h = t_h + 15 + name_size[1] + 10 + sub_size[1]
+                block_w = max(t_w, name_size[0], sub_size[0]) + 50
+                block_x = (WINDOW_W - block_w) // 2
+                block_y = (WINDOW_H - block_h) // 2
 
-        # ── Circular timer: top-right, yellow/gold, same size as counting/waiting ──
-        # Matches renderer.py: radius=20, thickness=3, margin=15
+                # Semi-transparent dark backdrop
+                ov = frame.copy()
+                pad = 20
+                cv2.rectangle(ov, (block_x - pad, block_y - pad),
+                              (block_x + block_w + pad, block_y + block_h + pad),
+                              (0, 0, 0), -1)
+                cv2.addWeighted(ov, 0.6, frame, 0.4, 0, frame)
+
+                # Place thumbnail (centered horizontally)
+                tx = (WINDOW_W - t_w) // 2
+                ty = block_y
+                frame[ty:ty + t_h, tx:tx + t_w] = thumb_img
+
+                # Stream name (below thumbnail)
+                name_x = (WINDOW_W - name_size[0]) // 2
+                name_y = ty + t_h + 15 + name_size[1]
+                cv2.putText(frame, name_text, (name_x, name_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+
+                # "NEXT STREAM" subtitle
+                sub_x = (WINDOW_W - sub_size[0]) // 2
+                sub_y = name_y + 10 + sub_size[1]
+                cv2.putText(frame, "NEXT STREAM", (sub_x, sub_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 180), 1, cv2.LINE_AA)
+
+            else:
+                # No thumbnail — text only (centered)
+                t_size = cv2.getTextSize(name_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+                tx = (WINDOW_W - t_size[0]) // 2
+                ty = WINDOW_H // 2 + t_size[1] // 2
+
+                ov = frame.copy()
+                pad = 25
+                cv2.rectangle(ov, (tx - pad, ty - t_size[1] - pad),
+                              (tx + t_size[0] + pad, ty + pad + 40), (0, 0, 0), -1)
+                cv2.addWeighted(ov, 0.6, frame, 0.4, 0, frame)
+
+                cv2.putText(frame, name_text, (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3, cv2.LINE_AA)
+                sub_size = cv2.getTextSize("NEXT STREAM", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+                cv2.putText(frame, "NEXT STREAM",
+                            (WINDOW_W // 2 - sub_size[0] // 2, ty + 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 180), 1, cv2.LINE_AA)
+
+        # ── Circular timer: top-right, yellow/gold ──
         h, w = frame.shape[:2]
         radius = 20
         thickness = 3
         margin = 15
         center = (w - margin - radius, margin + radius)
         ratio = remaining / duration if duration > 0 else 0
-        color = (0, 215, 255)  # Yellow/Gold (BGR)
+        color = (0, 215, 255)
 
-        # Background circle (dark) — same as counting/waiting
         cv2.circle(frame, center, radius, (40, 40, 40), -1)
-
-        # Progress arc (clockwise from top) — same as counting/waiting
         if ratio > 0:
             angle = int(360 * ratio)
             cv2.ellipse(frame, center, (radius, radius), -90, 0, angle,
                         color, thickness, cv2.LINE_AA)
 
-        # Timer number in center — same style as count display
         timer_text = str(int(remaining) + 1)
         t_sz = cv2.getTextSize(timer_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
         cv2.putText(frame, timer_text,
@@ -393,7 +464,6 @@ def show_betting_phase(rd: RoundData, duration: float,
 
         push_frame(frame)
 
-        # CRITICAL: Always call cv2.waitKey to process Windows messages
         if debug_gui and pipeline:
             key = update_debug_window(pipeline)
         else:
@@ -519,7 +589,9 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
             url = s.get("url", "")
             if name and url:
                 cfg_path = stream_config_path(name)
-                pipeline.add_stream(name, url, cfg_path, imgsz=imgsz)
+                pipeline.add_stream(name, url, cfg_path, imgsz=imgsz,
+                                    animation_video=s.get("animation", ""),
+                                    thumbnail=s.get("thumbnail", ""))
 
     # ── Cold start: add all streams from current slot ──
     active_slot = get_active_slot(slots)
@@ -869,7 +941,7 @@ def main():
                         help="Path to streams_config.json")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                         help="YOLO model file")
-    parser.add_argument("--imgsz", type=int, default=1248,
+    parser.add_argument("--imgsz", type=int, default=1280,
                         help="YOLO input image size")
     parser.add_argument("--gui", action="store_true",
                         help="Development mode: debug GUI window showing live "

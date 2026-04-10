@@ -46,8 +46,8 @@ def draw_tracking_overlay(frame, dots, brackets, line_config):
             pt1 = (int(line[0][0]), int(line[0][1]))
             pt2 = (int(line[1][0]), int(line[1][1]))
             cv2.line(frame, pt1, pt2, (0, 255, 0), 3, cv2.LINE_AA)
-            cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            # cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
 
         if mode == "roi" and roi and len(roi) >= 3:
             pts = np.array([(int(p[0]), int(p[1])) for p in roi], dtype=np.int32)
@@ -251,8 +251,8 @@ def draw_zones(frame, counter, line_color, roi_color):
         pt1, pt2 = current_line
         cv2.line(frame, pt1, pt2, line_color, 3)
         mid = ((pt1[0]+pt2[0])//2, (pt1[1]+pt2[1])//2)
-        cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, line_color, 2)
+        # cv2.putText(frame, "COUNTING LINE", (pt1[0], pt1[1] - 10),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.6, line_color, 2)
 
     # ── In-progress polygon preview ──
     if counter.poly_points:

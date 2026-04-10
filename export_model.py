@@ -12,4 +12,4 @@ model.export(
     device=0           # explicitly GPU
 )
 
-# yolo export model=yolo11x.pt format=engine imgsz=1248 half=True device=0 workspace=4
+# yolo export model=yolo11x.pt format=engine imgsz=1280 half=True device=0 workspace=4
