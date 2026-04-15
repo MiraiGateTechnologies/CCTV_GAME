@@ -294,6 +294,7 @@ def _calculate_timers() -> dict:
         "phase_timer": round(phase_remaining, 1),
         "round_timer": round(round_remaining, 1),
         "round_elapsed": round(round_elapsed, 1),
+        "phase_elapsed": round(phase_elapsed, 1),
     }
 
 
@@ -356,7 +357,10 @@ def get_api_response() -> dict:
             
             # 10. Betting timer (15 sec, only during BETTING)
             "betting_timer": timers["phase_timer"] if phase == "BETTING" else 0,
-            
+
+            # 11. Phase elapsed (seconds into current phase — for reload catch-up)
+            "phase_elapsed": timers["phase_elapsed"],
+
             "phase": phase,
             "commitment_hash": _state["commitment_hash"],
 

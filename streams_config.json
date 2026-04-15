@@ -450,7 +450,7 @@
                 {
                     "name": "Tokyo Shinjuku",
                     "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5",
-                    "animation": "tokyo_animation.mp4",
+                    "animation": "",
                     "thumbnail": "Shinjuku.mp4",
                     "lat": 35.7015889,
                     "lng": 139.7091973
@@ -458,7 +458,7 @@
                 {
                     "name": "Tokyo Shinjuku Kabukicho",
                     "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y",
-                    "animation": "tokyo_animation.mp4",
+                    "animation": "",
                     "thumbnail": "Kabukicho.mp4",
                     "lat": 35.7015889,
                     "lng": 139.7091973
@@ -466,7 +466,7 @@
                 {
                     "name": "Shibuya Scramble Crossing - Tokyo, Japan",
                     "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT",
-                    "animation": "tokyo_animation.mp4",
+                    "animation": "",
                     "thumbnail": "Shibuya.mp4",
                     "lat": 35.7015889,
                     "lng": 139.7091973
@@ -474,39 +474,39 @@
                 {
                     "name": "Aomori City (Yanagimachi Intersection)",
                     "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl",
-                    "animation": "aomori_animation.mp4",
-                    "thumbnail": "",
+                    "animation": "",
+                    "thumbnail": "Aomori.mp4",
                     "lat": 40.8221236,
                     "lng": 138.5073853
                 },
                 {
                     "name": "Russia Petersburg",
                     "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI",
-                    "animation": "russia_animation.mp4",
-                    "thumbnail": "russia.jpg",
+                    "animation": "",
+                    "thumbnail": "russia.mp4",
                     "lat": 59.9310653,
                     "lng": 30.2908516
                 },
                 {
                     "name": "Northern Ring Road - Papal Gate, Vatican City",
                     "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S",
-                    "animation": "egypt_animation.mp4",
-                    "thumbnail": "egypt.jpg",
+                    "animation": "",
+                    "thumbnail": "egypt.mp4",
                     "lat": 30.0444,
                     "lng": 31.2357
                 },
                 {
                     "name": "Town Quay Southampton",
                     "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ",
-                    "animation": "southampton_animation.mp4",
-                    "thumbnail": "southampton.jpg",
+                    "animation": "",
+                    "thumbnail": "southampton.mp4",
                     "lat": 50.8958,
                     "lng": -1.4044
                 },
                 {
                     "name": "Capelle aan den IJssel, Netherlands",
-                    "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1",
-                    "animation": "netherlands_animation.mp4",
+                    "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=xYnnJ2vp4w4-FGmH",
+                    "animation": "",
                     "thumbnail": "netherlands.jpg",
                     "lat": 51.9292,
                     "lng": 4.578
@@ -514,23 +514,23 @@
                 {
                     "name": "Sapporo City, Japan",
                     "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1",
-                    "animation": "sapporo_animation.mp4",
-                    "thumbnail": "sapporo.jpg",
+                    "animation": "",
+                    "thumbnail": "sapporo.mp4",
                     "lat": 43.0618,
                     "lng": 141.3545
                 },
                 {
                     "name": "El Gaucho - Bangkok, Thailand",
                     "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A",
-                    "animation": "bangkok_animation.mp4",
-                    "thumbnail": "bangkok.jpg",
+                    "animation": "",
+                    "thumbnail": "bangkok.mp4",
                     "lat": 13.7563,
                     "lng": 100.5018
                 },
                 {
                     "name": "Patong-Phuket, Thailand",
                     "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0",
-                    "animation": "phuket_animation.mp4",
+                    "animation": "",
                     "thumbnail": "phuket.mp4",
                     "lat": 7.8804,
                     "lng": 98.292

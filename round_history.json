@@ -1070,7 +1070,9 @@
     21,
     45,
     22,
-    5
+    5,
+    23,
+    17
   ],
   "Charles Austin,Hopkins": [
     1
@@ -1183,6 +1185,10 @@
     32,
     7,
     29,
+    6,
+    25,
+    37,
+    38,
     6
   ],
   "Shibuya Scramble Crossing - Tokyo, Japan": [
@@ -1275,7 +1281,9 @@
     10,
     13,
     14,
-    19
+    19,
+    11,
+    5
   ],
   "Aomori City (Yanagimachi Intersection)": [
     10,
@@ -1421,7 +1429,8 @@
     18,
     23,
     27,
-    19
+    19,
+    14
   ],
   "Fresno-California, USA": [
     1
@@ -1491,7 +1500,8 @@
     26,
     16,
     12,
-    25
+    25,
+    26
   ],
   "Sapporo City, Japan": [
     17,

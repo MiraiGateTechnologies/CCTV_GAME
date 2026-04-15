@@ -23,26 +23,41 @@
         }
         #globe-canvas { width: 100%; height: 100%; display: block; }
 
-        /* Thumbnail overlay */
+        /* Stream name — top center */
+        #stream-name-overlay {
+            position: absolute; top: 18px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 30; display: none;
+            color: #fff; font-size: 18px; font-weight: 700;
+            font-family: 'Segoe UI', sans-serif;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.9);
+            letter-spacing: 1px;
+            white-space: nowrap;
+        }
+
+        /* Thumbnail overlay — positioned dynamically below pin */
         #thumbnail-overlay {
-            position: absolute; top: 50%; left: 50%;
-            transform: translate(-50%, -50%);
+            position: absolute;
+            transform: translateX(-50%);  /* center horizontally on pin */
             text-align: center; z-index: 25; display: none;
+            pointer-events: none;
         }
+
+        /* Red blinking connector line from pin to thumbnail */
+        #pin-connector {
+            width: 1.5px; margin: 0 auto;
+            background: #ff3344;
+            animation: pinLineBlink 0.8s ease-in-out infinite;
+        }
+        @keyframes pinLineBlink {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+
         #thumbnail-overlay img, #thumbnail-overlay video {
-            max-width: 220px; max-height: 130px;
-            border-radius: 10px; border: 2px solid rgba(255,255,255,0.3);
-            margin-bottom: 10px; display: block; margin-left: auto; margin-right: auto;
-        }
-        .thumb-name {
-            color: #fff; font-size: 20px; font-weight: 700;
-            font-family: 'Segoe UI', sans-serif;
-            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
-        }
-        .thumb-subtitle {
-            color: #00dca0; font-size: 13px; margin-top: 4px;
-            font-family: 'Segoe UI', sans-serif;
-            text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+            max-width: 180px; max-height: 110px;
+            border-radius: 8px; border: 1.5px solid rgba(255,80,80,0.5);
+            display: block; margin-left: auto; margin-right: auto;
         }
 
         /* Status dot */
@@ -70,11 +85,13 @@
     <!-- LiveKit stream (COUNTING + WAITING) — ALWAYS in DOM, never removed -->
     <div id="stream-container"><video id="livekit-video" autoplay playsinline muted></video></div>
 
-    <!-- Thumbnail overlay -->
+    <!-- Stream name — top center during BETTING -->
+    <div id="stream-name-overlay"></div>
+
+    <!-- Thumbnail overlay — positioned below pin, connected by red line -->
     <div id="thumbnail-overlay">
+        <div id="pin-connector"></div>
         <img id="thumb-img" src="" alt="" style="display:none">
-        <div class="thumb-name" id="thumb-name"></div>
-        <div class="thumb-subtitle">NEXT STREAM</div>
     </div>
 
     <!-- Timer -->
@@ -93,9 +110,9 @@
     // ══════════════════════════════════════════
     //  CONFIG — adjustable timings
     // ══════════════════════════════════════════
-    const THUMBNAIL_REVEAL_SEC = 6;   // When to show thumbnail (seconds into BETTING)
+    const PIN_DROP_SEC = 9;            // When pin drops on globe
+    const THUMBNAIL_REVEAL_SEC = 11;   // When to show thumbnail
     const BETTING_DURATION = 15;       // Total betting phase duration
-    const PIN_DROP_SEC = 8;            // When pin drops on globe
 
     // ══════════════════════════════════════════
     //  ELEMENTS
@@ -105,19 +122,26 @@
     const lkVideo = document.getElementById('livekit-video');
     const thumbOverlay = document.getElementById('thumbnail-overlay');
     const thumbImg = document.getElementById('thumb-img');
-    const thumbName = document.getElementById('thumb-name');
+    const pinConnector = document.getElementById('pin-connector');
+    const streamNameOverlay = document.getElementById('stream-name-overlay');
     const timerCanvas = document.getElementById('timer-overlay');
     const timerCtx = timerCanvas.getContext('2d');
     const dot = document.getElementById('status-dot');
 
+    // Store current pin lat/lng for screen projection
+    let currentPinLat = 0, currentPinLng = 0;
+
     let currentPhase = 'IDLE';
     let liveKitConnected = false;
+    let initialStateSynced = false;  // true after first data handles reload catch-up
 
     // ══════════════════════════════════════════
     //  THREE.JS GLOBE
     // ══════════════════════════════════════════
     let scene, camera, renderer, earth, pinGroup;
     let globeRunning = false;
+    let idleRotationTween = null;  // continuous anti-clockwise spin
+    let bettingTimeouts = [];      // track scheduled timeouts for cleanup
 
     function initGlobe() {
         scene = new THREE.Scene();
@@ -125,7 +149,8 @@
         camera.position.set(0, 0, 3.5);
 
         const canvas = document.getElementById('globe-canvas');
-        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+        renderer.setClearColor(0x000000, 1);  // solid black background (no bleed-through)
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
@@ -150,8 +175,10 @@
             new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.08, side: THREE.BackSide })
         ));
 
+        // Pin group is CHILD OF EARTH — pins rotate with the globe
         pinGroup = new THREE.Group();
-        scene.add(pinGroup);
+        earth.add(pinGroup);
+
         scene.add(new THREE.AmbientLight(0xffffff, 0.3));
 
         window.addEventListener('resize', () => {
@@ -177,7 +204,9 @@
         globeRunning = false;
     }
 
-    // FIX #2: Correct lat/lng to 3D — accounts for Three.js sphere UV mapping
+    // ── Lat/Lng to 3D position on sphere ──
+    // Matches Three.js SphereGeometry UV mapping for equirectangular textures.
+    // The +180 offset aligns with texture left edge = antimeridian (-180°).
     function latLngToVector3(lat, lng, radius) {
         const phi = (90 - lat) * (Math.PI / 180);
         const theta = (lng + 180) * (Math.PI / 180);
@@ -188,80 +217,215 @@
         );
     }
 
-    function flyToCity(lat, lng, cityName, thumbnail) {
-        // Clear previous
-        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
-        thumbOverlay.style.display = 'none';
-
-        // FIX #2: Reset earth rotation and rotate earth so target city faces camera
-        // Instead of moving camera around the globe, rotate the earth to bring city to front
-        const targetOnSurface = latLngToVector3(lat, lng, 1);
-
-        // Calculate earth rotation to face city toward camera (camera stays at z=3.5)
-        // Target angle: the city should be at the front of the globe (facing +Z)
-        const targetTheta = Math.atan2(-targetOnSurface.x, targetOnSurface.z);
-        const targetPhi = Math.asin(targetOnSurface.y);
-
-        // Phase 1 (0-2s): Gentle slow rotation
-        earth.rotation.y = 0;
-        const startRotY = earth.rotation.y;
-
-        // Phase 2 (2-8s): Rotate earth to face city + camera zooms in
-        new TWEEN.Tween(earth.rotation)
-            .to({ y: targetTheta }, 5000)
-            .delay(2000)
-            .easing(TWEEN.Easing.Cubic.InOut)
-            .start();
-
-        // Camera: zoom from 3.5 to 2.0 (closer to globe)
-        new TWEEN.Tween(camera.position)
-            .to({ x: 0, y: targetOnSurface.y * 0.8, z: 2.0 }, 5000)
-            .delay(2000)
-            .easing(TWEEN.Easing.Cubic.InOut)
-            .onUpdate(() => camera.lookAt(0, 0, 0))
-            .start();
-
-        // Phase 3: Pin drop at PIN_DROP_SEC
-        setTimeout(() => {
-            // Recalculate pin position with current earth rotation
-            const pinPos = latLngToVector3(lat, lng, 1.01);
-            const pin = new THREE.Mesh(
-                new THREE.SphereGeometry(0.025, 16, 16),
-                new THREE.MeshBasicMaterial({ color: 0xff3344 })
-            );
-            pin.position.copy(pinPos);
-            pinGroup.add(pin);
-
-            // Glow ring
-            const ring = new THREE.Mesh(
-                new THREE.RingGeometry(0.04, 0.06, 32),
-                new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
-            );
-            ring.position.copy(pinPos);
-            ring.lookAt(0, 0, 0);
-            pinGroup.add(ring);
-
-            // Pulse
-            (function pulse() {
-                new TWEEN.Tween(ring.scale).to({x:1.8,y:1.8,z:1.8}, 700)
-                    .easing(TWEEN.Easing.Cubic.Out)
-                    .chain(new TWEEN.Tween(ring.scale).to({x:1,y:1,z:1}, 700)
-                        .easing(TWEEN.Easing.Cubic.In).onComplete(pulse))
-                    .start();
-            })();
-        }, PIN_DROP_SEC * 1000);
-
-        // Phase 4: Thumbnail at THUMBNAIL_REVEAL_SEC
-        setTimeout(() => showThumbnail(cityName, thumbnail), THUMBNAIL_REVEAL_SEC * 1000);
+    // ── Camera spherical positioning ──
+    // Convert spherical (distance, polarAngle, azimuthAngle) to camera XYZ.
+    // polarAngle: 0=north pole, PI/2=equator, PI=south pole
+    // azimuthAngle: horizontal orbit (radians)
+    function setCameraSpherical(dist, polar, azimuth) {
+        camera.position.set(
+            dist * Math.sin(polar) * Math.sin(azimuth),
+            dist * Math.cos(polar),
+            dist * Math.sin(polar) * Math.cos(azimuth)
+        );
+        camera.lookAt(0, 0, 0);
     }
 
-    // FIX #3: Thumbnail — supports both photo and video
+    // ── Compute camera spherical angles to look directly at a lat/lng point ──
+    // Camera must be on the OPPOSITE side of the globe from the target point.
+    // Derived from: camera_pos = -point_pos * distance (so camera looks toward origin → sees point)
+    function targetAnglesForLatLng(lat, lng) {
+        const phi = (90 - lat) * (Math.PI / 180);
+        const theta = (lng + 180) * (Math.PI / 180);
+        // Point on unit sphere (same as latLngToVector3)
+        const px = -(Math.sin(phi) * Math.cos(theta));
+        const py =  Math.cos(phi);
+        const pz =  Math.sin(phi) * Math.sin(theta);
+        // Camera at -P (opposite side)
+        const cx = -px, cy = -py, cz = -pz;
+        // Convert to spherical: cy = cos(polar), cx = sin(polar)*sin(az), cz = sin(polar)*cos(az)
+        const polar = Math.acos(Math.max(-1, Math.min(1, cy)));
+        const sinPolar = Math.sin(polar);
+        const azimuth = (Math.abs(sinPolar) < 1e-10) ? 0 : Math.atan2(cx / sinPolar, cz / sinPolar);
+        return { polar, azimuth };
+    }
+
+    // ── Create pin + pulsing ring at lat/lng (in earth-local space) ──
+    function createPin(lat, lng) {
+        const pos = latLngToVector3(lat, lng, 1.01);
+        const pin = new THREE.Mesh(
+            new THREE.SphereGeometry(0.025, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xff3344 })
+        );
+        pin.position.copy(pos);
+        pinGroup.add(pin);
+
+        const ring = new THREE.Mesh(
+            new THREE.RingGeometry(0.04, 0.06, 32),
+            new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+        );
+        ring.position.copy(pos);
+        ring.lookAt(new THREE.Vector3(0, 0, 0));  // face outward from earth center
+        pinGroup.add(ring);
+
+        // Pulsing animation
+        (function pulse() {
+            new TWEEN.Tween(ring.scale).to({ x: 1.8, y: 1.8, z: 1.8 }, 700)
+                .easing(TWEEN.Easing.Cubic.Out)
+                .chain(new TWEEN.Tween(ring.scale).to({ x: 1, y: 1, z: 1 }, 700)
+                    .easing(TWEEN.Easing.Cubic.In).onComplete(pulse))
+                .start();
+        })();
+    }
+
+    // ══════════════════════════════════════════
+    //  ANIMATION: flyToCity (normal round start)
+    //
+    //  Timeline (15 sec BETTING):
+    //    0-3s:  Anti-clockwise idle spin (earth rotates, camera far)
+    //    3-8s:  Camera orbits to city + zooms in close
+    //    9s:    Pin drops on exact lat/lng
+    //    11s:   Thumbnail video/image appears
+    //    15s:   BETTING ends → stream shows
+    //
+    //  Approach: Earth stays FIXED (rotation.y = 0). Camera ORBITS around it.
+    //  Pin is child of earth → always at correct lat/lng regardless of view.
+    // ══════════════════════════════════════════
+
+    function flyToCity(lat, lng, cityName, thumbnail) {
+        // Clear previous
+        clearBettingTimeouts();
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        thumbOverlay.style.display = 'none';
+        hideStreamName();
+        TWEEN.removeAll();
+
+        // Store for screen projection later
+        currentPinLat = lat;
+        currentPinLng = lng;
+
+        // Earth stays at rotation 0 — camera moves instead
+        earth.rotation.set(0, 0, 0);
+
+        // Target camera angles to face the city
+        const target = targetAnglesForLatLng(lat, lng);
+        const startDist = 3.5;
+        const endDist = 1.8;    // close zoom
+
+        // Animation state object (TWEEN interpolates this)
+        const camState = { dist: startDist, polar: Math.PI / 2, azimuth: 0 };
+
+        // Phase 1 (0-3s): Anti-clockwise idle spin
+        new TWEEN.Tween(camState)
+            .to({ azimuth: -Math.PI / 3 }, 3000)
+            .easing(TWEEN.Easing.Linear.None)
+            .onUpdate(() => setCameraSpherical(camState.dist, camState.polar, camState.azimuth))
+            .start();
+
+        // Phase 2 (3-8s): Orbit to city + zoom in
+        new TWEEN.Tween(camState)
+            .to({ dist: endDist, polar: target.polar, azimuth: target.azimuth }, 5000)
+            .delay(3000)
+            .easing(TWEEN.Easing.Cubic.InOut)
+            .onUpdate(() => setCameraSpherical(camState.dist, camState.polar, camState.azimuth))
+            .start();
+
+        // Phase 3 (9s): Pin drop + show stream name
+        const t1 = setTimeout(() => {
+            createPin(lat, lng);
+            showStreamName(cityName);
+        }, PIN_DROP_SEC * 1000);
+        bettingTimeouts.push(t1);
+
+        // Phase 4 (11s): Thumbnail below pin
+        const t2 = setTimeout(() => showThumbnail(cityName, thumbnail), THUMBNAIL_REVEAL_SEC * 1000);
+        bettingTimeouts.push(t2);
+    }
+
+    // ── Instant snap for reload catch-up ──
+    function snapToCity(lat, lng, cityName, thumbnail, phaseElapsed) {
+        clearBettingTimeouts();
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        thumbOverlay.style.display = 'none';
+        hideStreamName();
+        TWEEN.removeAll();
+
+        currentPinLat = lat;
+        currentPinLng = lng;
+        earth.rotation.set(0, 0, 0);
+
+        // Snap camera to final position (facing city, zoomed in)
+        const target = targetAnglesForLatLng(lat, lng);
+        setCameraSpherical(1.8, target.polar, target.azimuth);
+
+        // Pin + stream name: show if past PIN_DROP_SEC, else schedule
+        if (phaseElapsed >= PIN_DROP_SEC) {
+            createPin(lat, lng);
+            showStreamName(cityName);
+        } else {
+            const t = setTimeout(() => {
+                createPin(lat, lng);
+                showStreamName(cityName);
+            }, (PIN_DROP_SEC - phaseElapsed) * 1000);
+            bettingTimeouts.push(t);
+        }
+
+        // Thumbnail: show if past THUMBNAIL_REVEAL_SEC, else schedule
+        if (phaseElapsed >= THUMBNAIL_REVEAL_SEC) {
+            showThumbnail(cityName, thumbnail);
+        } else {
+            const t = setTimeout(() => showThumbnail(cityName, thumbnail),
+                (THUMBNAIL_REVEAL_SEC - phaseElapsed) * 1000);
+            bettingTimeouts.push(t);
+        }
+    }
+
+    function clearBettingTimeouts() {
+        bettingTimeouts.forEach(t => clearTimeout(t));
+        bettingTimeouts = [];
+    }
+
+    // ── Project a lat/lng pin position to screen (x, y) pixels ──
+    function projectPinToScreen(lat, lng) {
+        const pos = latLngToVector3(lat, lng, 1.01);
+        // Pin is in earth-local space; earth.rotation is (0,0,0) so world = local
+        const worldPos = pos.clone();
+        earth.localToWorld(worldPos);
+        const projected = worldPos.clone().project(camera);
+        return {
+            x: (projected.x * 0.5 + 0.5) * window.innerWidth,
+            y: (-projected.y * 0.5 + 0.5) * window.innerHeight
+        };
+    }
+
+    // ── Show stream name at top center ──
+    function showStreamName(name) {
+        streamNameOverlay.textContent = name || '';
+        streamNameOverlay.style.display = 'block';
+    }
+
+    function hideStreamName() {
+        streamNameOverlay.style.display = 'none';
+    }
+
+    // ── Show thumbnail below pin, connected by red blinking line ──
     function showThumbnail(cityName, thumbnail) {
-        // Hide previous
+        // Hide previous media
         thumbImg.style.display = 'none';
         let vid = document.getElementById('thumb-video');
         if (vid) { vid.pause(); vid.style.display = 'none'; }
 
+        // Project pin to screen coords
+        const pin = projectPinToScreen(currentPinLat, currentPinLng);
+
+        // Connector line height (distance from pin to thumbnail)
+        const lineHeight = 40;
+        pinConnector.style.height = lineHeight + 'px';
+
+        // Position overlay: centered horizontally on pin, starts just below pin
+        thumbOverlay.style.left = pin.x + 'px';
+        thumbOverlay.style.top = (pin.y + 8) + 'px';  // 8px below pin dot
+
+        // Load media
         if (thumbnail) {
             const ext = thumbnail.split('.').pop().toLowerCase();
             const isVideo = ['mp4', 'webm', 'mov'].includes(ext);
@@ -271,8 +435,9 @@
                     vid = document.createElement('video');
                     vid.id = 'thumb-video';
                     vid.autoplay = true; vid.muted = true; vid.playsInline = true;
-                    vid.style.cssText = 'max-width:220px;max-height:130px;border-radius:10px;border:2px solid rgba(255,255,255,0.3);margin-bottom:10px;display:block;margin-left:auto;margin-right:auto;';
-                    thumbOverlay.insertBefore(vid, thumbOverlay.querySelector('.thumb-name'));
+                    vid.loop = true;
+                    vid.style.cssText = 'max-width:180px;max-height:110px;border-radius:8px;border:1.5px solid rgba(255,80,80,0.5);display:block;margin:0 auto;';
+                    thumbOverlay.appendChild(vid);
                 }
                 vid.src = '/thumbnails/' + thumbnail;
                 vid.style.display = 'block';
@@ -283,12 +448,16 @@
             }
         }
 
-        thumbName.textContent = cityName || '';
+        // Show stream name at top center
+        showStreamName(cityName);
+
         thumbOverlay.style.display = 'block';
     }
 
     function resetGlobe() {
+        clearBettingTimeouts();
         thumbOverlay.style.display = 'none';
+        hideStreamName();
         const vid = document.getElementById('thumb-video');
         if (vid) { vid.pause(); vid.style.display = 'none'; }
         while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
@@ -322,17 +491,21 @@
     //  LiveKit video ALWAYS plays, never detached from DOM
     // ══════════════════════════════════════════
     function showGlobePhase() {
-        globeContainer.style.zIndex = '10';   // globe on top
-        streamContainer.style.zIndex = '5';    // stream behind (STILL PLAYING)
-        startGlobeLoop();                       // start rendering
+        globeContainer.style.zIndex = '10';       // globe on top
+        globeContainer.style.visibility = 'visible';
+        streamContainer.style.zIndex = '5';        // stream behind (STILL PLAYING)
+        startGlobeLoop();                           // start rendering
         dot.className = 'status-dot betting';
     }
 
     function showStreamPhase() {
-        globeContainer.style.zIndex = '1';    // globe behind
-        streamContainer.style.zIndex = '10';   // stream on top
-        stopGlobeLoop();                        // FREE GPU for LiveKit
+        globeContainer.style.zIndex = '1';         // globe behind
+        globeContainer.style.visibility = 'hidden'; // HIDE completely — no stars bleed
+        streamContainer.style.zIndex = '10';        // stream on top
+        stopGlobeLoop();                             // FREE GPU for LiveKit
+        clearBettingTimeouts();
         thumbOverlay.style.display = 'none';
+        hideStreamName();
         dot.className = liveKitConnected ? 'status-dot connected' : 'status-dot disconnected';
     }
 
@@ -346,8 +519,9 @@
 
     function handleGameData(data) {
         const phase = data.phase;
+        const phaseElapsed = data.phase_elapsed || 0;
 
-        // Timer
+        // ── Timer (always update, safe on every message) ──
         if (phase === 'BETTING') {
             drawTimer(data.betting_timer || 0, BETTING_DURATION, '#ffd700');
         } else if (phase === 'COUNTING') {
@@ -359,14 +533,50 @@
             drawTimer(0, 1, '#666');
         }
 
-        // Phase switch: BETTING starts
+        // ── Reload catch-up: first data after page load ──
+        // currentPhase is 'IDLE' only on fresh load / reload.
+        // We need to jump straight to whatever phase the server is in.
+        if (!initialStateSynced) {
+            initialStateSynced = true;
+
+            if (phase === 'COUNTING' || phase === 'WAITING') {
+                // Server is mid-stream — show stream immediately, hide globe
+                currentPhase = phase;
+                lastRoundId = data.round_id || '';
+                bettingAnimStarted = true;   // don't trigger globe anim later
+                showStreamPhase();
+                return;
+            }
+
+            if (phase === 'BETTING') {
+                // Server is mid-betting — show globe, snap to city instantly
+                currentPhase = 'BETTING';
+                lastRoundId = data.round_id || '';
+                bettingAnimStarted = true;
+                showGlobePhase();
+                resetGlobe();
+
+                const lat = data.city_lat || 0;
+                const lng = data.city_lng || 0;
+                const name = data.city_name || data.stream_name || '';
+                const thumb = data.thumbnail || '';
+                if (lat !== 0 || lng !== 0) {
+                    snapToCity(lat, lng, name, thumb, phaseElapsed);
+                }
+                return;
+            }
+
+            // phase === 'IDLE' — nothing to catch up, fall through
+        }
+
+        // ── Normal phase transition: BETTING starts ──
         if (phase === 'BETTING' && currentPhase !== 'BETTING') {
             currentPhase = 'BETTING';
             showGlobePhase();
             bettingAnimStarted = false;
         }
 
-        // Start globe animation (once per round)
+        // ── Start globe animation (once per round, normal flow) ──
         if (phase === 'BETTING' && !bettingAnimStarted) {
             const rid = data.round_id;
             if (rid !== lastRoundId) {
@@ -381,12 +591,13 @@
             }
         }
 
-        // Phase switch: COUNTING/WAITING starts (hide globe, show stream)
+        // ── Phase transition: BETTING → COUNTING/WAITING (show stream) ──
         if ((phase === 'COUNTING' || phase === 'WAITING') && currentPhase === 'BETTING') {
             currentPhase = phase;
             showStreamPhase();
         }
 
+        // ── Track sub-transitions (COUNTING → WAITING) ──
         if (phase === 'COUNTING') currentPhase = 'COUNTING';
         if (phase === 'WAITING') currentPhase = 'WAITING';
     }
