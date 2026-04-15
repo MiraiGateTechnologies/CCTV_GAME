@@ -1,159 +1,664 @@
 {
     "_CHANGE_GUIDE": {
-        "time_slots": "IST time ke hisaab se streams — start/end HH:MM format mein",
-        "streams": "Har slot mein multiple streams — round-robin mein cycle hote hain",
+        "time_slots": "IST time ke hisaab se streams \u00e2\u20ac\u201d start/end HH:MM format mein",
+        "streams": "Har slot mein multiple streams \u00e2\u20ac\u201d round-robin mein cycle hote hain",
         "name": "Stream ka display naam (koi bhi rakh sakte ho)",
         "url": "YouTube live stream URL ya direct RTSP/HLS URL"
     },
     "all_streams": [
-        { "name": "Charles Austin,Hopkins", "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt" },
-        { "name": "Tokyo Shinjuku", "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5" },
-        { "name": "Tokyo Shinjuku Kabukicho", "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y" },
-        { "name": "Shibuya Scramble Crossing - Tokyo, Japan", "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT" },
-        { "name": "Aomori City (Yanagimachi Intersection)", "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl" },
-        { "name": "Russia Petersburg", "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI" },
-        { "name": "Northern Ring Road - Papal Gate", "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S" },
-        { "name": "Town Quay Southampton", "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ" },
-        { "name": "Capelle aan den IJssel, Netherlands", "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1" },
-        { "name": "Sapporo City, Japan:", "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1" },
-        { "name": "Sapporo City 2, Japan", "url": "https://www.youtube.com/live/AWVVYHfxZac?si=SYf6IiLEUJr3fZF-" },
-        { "name": "San Marcos-Texas, US", "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU" },
-        { "name": "San Marcos-Texas 2, US", "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE" },
-        { "name": "San Marcos-Texas 3, US", "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB" },
-        { "name": "City of Orange Plaza-California,US", "url": "https://www.youtube.com/live/AShvF9ILGkc?si=krlXWd8zhdykJeLd" },
-        { "name": "El Gaucho - Bangkok, Thailand", "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A" },
-        { "name": "Patong-Phuket, Thailand", "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0" },
-        { "name": "Fresno-California, USA", "url": "https://www.youtube.com/live/1xl0hX-nF2E?si=Jslnzl0yMy9N-q23" },
-        { "name": "Fort Morgan-Colorado, USA", "url": "https://www.youtube.com/live/R3nGpwWDAHg?si=dmv-A7MDF-monU89" },
-        { "name": "Breckenridge-Colorado, USA", "url": "https://www.youtube.com/live/SH63YaIWyK0?si=J_-lhwCCnDAYoZ5z" },
-        { "name": "The Villages-Florida, USA", "url": "https://www.youtube.com/live/WY2t935xDqM?si=aKJKt4NaGo1UzOGE" },
-        { "name": "Tilton-New Hampshire, USA", "url": "https://www.youtube.com/live/auWahQLydIk?si=KPjQE2FYqIJktzpa" },
-        { "name": "Bellevue-Iowa, USA", "url": "https://www.youtube.com/live/ZyW1tTwBDeg?si=gTdoVjYHKVgYYPyD" },
-        { "name": "Derry-New Hampshire, USA", "url": "https://www.youtube.com/live/UWkwZ2hj84I?si=10SMFb-SSAHuufGP" },
-        { "name": "North Conway-New Hampshire, USA", "url": "https://www.youtube.com/live/H8bFFw-0ZQE?si=ODd5QFWNDG2elbh7" },
-        { "name": "Las Vegas-New Mexico, USA", "url": "https://www.youtube.com/live/sw8MuxrKcs8?si=r8m3gpi9506gSkFQ" },
-        { "name": "Fort Erie-Ontario, Canada", "url": "https://www.youtube.com/live/DnUFAShZKus?si=t5lZpbceuh8Kzl8u" },
-        { "name": "Montauk-New York, USA", "url": "https://www.youtube.com/live/LL6HrtRsR3o?si=YmLR0kxGI8Rua4Ac" },
-        { "name": "Watertown-New York, USA", "url": "https://www.youtube.com/live/Zz9hMrxl20I?si=FhTcsP6afHiR7PsX" },
-        { "name": "Vicksburg-Michigan, USA", "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=J2v0WxuSXoqgRKzR" },
-        { "name": "Traverse City-Michigan, USA", "url": "https://www.youtube.com/live/8-V9uEqFLwE?si=aNIEm3C82oYHhCAA" },
-        { "name": "Park Rapids-Minnesota, USA", "url": "https://www.youtube.com/live/4lN2PQEDtfY?si=41tWnUlYC358eU7s" },
-        { "name": "Apex-North Carolina, USA", "url": "https://www.youtube.com/live/-MWn7E2O-_o?si=JbOLCj3RD43Vpjc1" },
-        { "name": "Windhoek: 24/7 Live stream in Windhoek, Namibia", "url": "https://www.youtube.com/live/h7yL-ltAb_M?si=9U9uIH1VxIoFjtGL" },
-        { "name": "Vicksburg Michigan Oswalt Park Live 24/7", "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=eToESnZKfRdBtCfL" },
-        { "name": "Historic Town of Jonesborough, Tennessee | Live Cam", "url": "https://www.youtube.com/live/PmXKd2Z_TVA?si=W8Zw5dHoVXB9doAS" },
-        { "name": "Hopkins Street @ Moore Street", "url": "https://www.youtube.com/live/Qj6osxu6XVI?si=-0vh8jV8qksvuFSn" },
-        { "name": "Vicksburg Michigan Main Street Live 24/7", "url": "https://www.youtube.com/live/JSqLWu6MBHo?si=QYTatmEc60VDJkq6" },
-        { "name": "Barban", "url": "https://www.youtube.com/live/1CYRZ1IBGkM?si=CcZNtzjrlAfcm8yA" },
-        { "name": "Transmisión en vivo Puente Internacional Paso del Norte (Norte)", "url": "https://www.youtube.com/live/0Pg3S6s76IE?si=r0bBlOhIXAfNCVMW" },
-        { "name": "Kroměříž - náměstí Míru", "url": "https://www.youtube.com/live/PhabvW8rOas?si=bODft3kzrO3faBEx" },
-        { "name": "EarthCam Live: Allegiant Stadium (Las Vegas, NV)", "url": "https://www.youtube.com/live/_rmUXOHSf0w?si=uxAnH5DOiMIa72CM" },
-        { "name": "Bârlad Online www.b-o.ro Livecam 4K", "url": "https://www.youtube.com/live/jJ9QfuZRhIk?si=JEued2LLG05L1znK" },
-        { "name": "Hamptons.com - LIVE! 4K Main Street, Sag Harbor Village, New York", "url": "https://www.youtube.com/live/sxZxz0OPoh0?si=Ga9ndrW-M05i1c5Q" },
-        { "name": "Cámara en vivo | UADE Campus Buenos Aires", "url": "https://www.youtube.com/live/rqBfiegG5qU?si=bqmfzKsPbhihClvs" },
-        { "name": "Pattaya Beach Road, Thailand | Live Camera Stream", "url": "https://www.youtube.com/live/oFARVBFbn34?si=KWTkN1CiR1_XZM6y" },
-        { "name": "LIVE OBOR SQUARE, BUCHAREST, ROMANIA", "url": "https://www.youtube.com/live/S2o5AUbHGs0?si=2fdYlC0rsMCjTYXr" },
-        { "name": "Live Traffic @ 741 & 73", "url": "https://www.youtube.com/live/2juLrCH5w9U?si=32d3KopUMMhbFYCt" }
+        {
+            "name": "Charles Austin,Hopkins",
+            "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt",
+            "lat": 30.2685562,
+            "lng": -106.7102051
+        },
+        {
+            "name": "Tokyo Shinjuku",
+            "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5",
+            "lat": 35.7015889,
+            "lng": 139.7091973
+        },
+        {
+            "name": "Tokyo Shinjuku Kabukicho",
+            "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y",
+            "lat": 35.7015889,
+            "lng": 139.7091973
+        },
+        {
+            "name": "Shibuya Scramble Crossing - Tokyo, Japan",
+            "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT",
+            "lat": 35.6595,
+            "lng": 139.7004
+        },
+        {
+            "name": "Aomori City (Yanagimachi Intersection)",
+            "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl",
+            "lat": 40.8244,
+            "lng": 140.74
+        },
+        {
+            "name": "Russia Petersburg",
+            "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI",
+            "lat": 59.9343,
+            "lng": 30.3351
+        },
+        {
+            "name": "Northern Ring Road - Papal Gate",
+            "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S",
+            "lat": 30.0444,
+            "lng": 31.2357
+        },
+        {
+            "name": "Town Quay Southampton",
+            "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ",
+            "lat": 50.8958,
+            "lng": -1.4044
+        },
+        {
+            "name": "Capelle aan den IJssel, Netherlands",
+            "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1",
+            "lat": 51.9292,
+            "lng": 4.578
+        },
+        {
+            "name": "Sapporo City, Japan:",
+            "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1",
+            "lat": 43.0618,
+            "lng": 141.3545
+        },
+        {
+            "name": "Sapporo City 2, Japan",
+            "url": "https://www.youtube.com/live/AWVVYHfxZac?si=SYf6IiLEUJr3fZF-",
+            "lat": 43.0618,
+            "lng": 141.3545
+        },
+        {
+            "name": "San Marcos-Texas, US",
+            "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU",
+            "lat": 29.8833,
+            "lng": -97.9414
+        },
+        {
+            "name": "San Marcos-Texas 2, US",
+            "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE",
+            "lat": 29.8833,
+            "lng": -97.9414
+        },
+        {
+            "name": "San Marcos-Texas 3, US",
+            "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB",
+            "lat": 29.8833,
+            "lng": -97.9414
+        },
+        {
+            "name": "City of Orange Plaza-California,US",
+            "url": "https://www.youtube.com/live/AShvF9ILGkc?si=krlXWd8zhdykJeLd",
+            "lat": 33.7879,
+            "lng": -117.8531
+        },
+        {
+            "name": "El Gaucho - Bangkok, Thailand",
+            "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A",
+            "lat": 13.7563,
+            "lng": 100.5018
+        },
+        {
+            "name": "Patong-Phuket, Thailand",
+            "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0",
+            "lat": 7.8804,
+            "lng": 98.292
+        },
+        {
+            "name": "Fresno-California, USA",
+            "url": "https://www.youtube.com/live/1xl0hX-nF2E?si=Jslnzl0yMy9N-q23",
+            "lat": 36.7378,
+            "lng": -119.7871
+        },
+        {
+            "name": "Fort Morgan-Colorado, USA",
+            "url": "https://www.youtube.com/live/R3nGpwWDAHg?si=dmv-A7MDF-monU89",
+            "lat": 40.2502,
+            "lng": -103.7997
+        },
+        {
+            "name": "Breckenridge-Colorado, USA",
+            "url": "https://www.youtube.com/live/SH63YaIWyK0?si=J_-lhwCCnDAYoZ5z",
+            "lat": 39.4817,
+            "lng": -106.0384
+        },
+        {
+            "name": "The Villages-Florida, USA",
+            "url": "https://www.youtube.com/live/WY2t935xDqM?si=aKJKt4NaGo1UzOGE",
+            "lat": 28.9348,
+            "lng": -81.9601
+        },
+        {
+            "name": "Tilton-New Hampshire, USA",
+            "url": "https://www.youtube.com/live/auWahQLydIk?si=KPjQE2FYqIJktzpa",
+            "lat": 43.4426,
+            "lng": -71.5887
+        },
+        {
+            "name": "Bellevue-Iowa, USA",
+            "url": "https://www.youtube.com/live/ZyW1tTwBDeg?si=gTdoVjYHKVgYYPyD",
+            "lat": 42.2586,
+            "lng": -90.4218
+        },
+        {
+            "name": "Derry-New Hampshire, USA",
+            "url": "https://www.youtube.com/live/UWkwZ2hj84I?si=10SMFb-SSAHuufGP",
+            "lat": 42.8806,
+            "lng": -71.3273
+        },
+        {
+            "name": "North Conway-New Hampshire, USA",
+            "url": "https://www.youtube.com/live/H8bFFw-0ZQE?si=ODd5QFWNDG2elbh7",
+            "lat": 44.0537,
+            "lng": -71.1284
+        },
+        {
+            "name": "Las Vegas-New Mexico, USA",
+            "url": "https://www.youtube.com/live/sw8MuxrKcs8?si=r8m3gpi9506gSkFQ",
+            "lat": 35.5942,
+            "lng": -105.2225
+        },
+        {
+            "name": "Fort Erie-Ontario, Canada",
+            "url": "https://www.youtube.com/live/DnUFAShZKus?si=t5lZpbceuh8Kzl8u",
+            "lat": 42.9061,
+            "lng": -79.0134
+        },
+        {
+            "name": "Montauk-New York, USA",
+            "url": "https://www.youtube.com/live/LL6HrtRsR3o?si=YmLR0kxGI8Rua4Ac",
+            "lat": 41.0362,
+            "lng": -71.9545
+        },
+        {
+            "name": "Watertown-New York, USA",
+            "url": "https://www.youtube.com/live/Zz9hMrxl20I?si=FhTcsP6afHiR7PsX",
+            "lat": 43.9748,
+            "lng": -75.9108
+        },
+        {
+            "name": "Vicksburg-Michigan, USA",
+            "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=J2v0WxuSXoqgRKzR",
+            "lat": 42.12,
+            "lng": -85.8533
+        },
+        {
+            "name": "Traverse City-Michigan, USA",
+            "url": "https://www.youtube.com/live/8-V9uEqFLwE?si=aNIEm3C82oYHhCAA",
+            "lat": 44.7631,
+            "lng": -85.6206
+        },
+        {
+            "name": "Park Rapids-Minnesota, USA",
+            "url": "https://www.youtube.com/live/4lN2PQEDtfY?si=41tWnUlYC358eU7s",
+            "lat": 46.9222,
+            "lng": -95.0536
+        },
+        {
+            "name": "Apex-North Carolina, USA",
+            "url": "https://www.youtube.com/live/-MWn7E2O-_o?si=JbOLCj3RD43Vpjc1",
+            "lat": 35.7327,
+            "lng": -78.8503
+        },
+        {
+            "name": "Windhoek: 24/7 Live stream in Windhoek, Namibia",
+            "url": "https://www.youtube.com/live/h7yL-ltAb_M?si=9U9uIH1VxIoFjtGL"
+        },
+        {
+            "name": "Vicksburg Michigan Oswalt Park Live 24/7",
+            "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=eToESnZKfRdBtCfL"
+        },
+        {
+            "name": "Historic Town of Jonesborough, Tennessee | Live Cam",
+            "url": "https://www.youtube.com/live/PmXKd2Z_TVA?si=W8Zw5dHoVXB9doAS"
+        },
+        {
+            "name": "Hopkins Street @ Moore Street",
+            "url": "https://www.youtube.com/live/Qj6osxu6XVI?si=-0vh8jV8qksvuFSn"
+        },
+        {
+            "name": "Vicksburg Michigan Main Street Live 24/7",
+            "url": "https://www.youtube.com/live/JSqLWu6MBHo?si=QYTatmEc60VDJkq6"
+        },
+        {
+            "name": "Barban",
+            "url": "https://www.youtube.com/live/1CYRZ1IBGkM?si=CcZNtzjrlAfcm8yA"
+        },
+        {
+            "name": "Transmisi\u00c3\u00b3n en vivo Puente Internacional Paso del Norte (Norte)",
+            "url": "https://www.youtube.com/live/0Pg3S6s76IE?si=r0bBlOhIXAfNCVMW"
+        },
+        {
+            "name": "Krom\u00c4\u203a\u00c5\u2122\u00c3\u00ad\u00c5\u00be - n\u00c3\u00a1m\u00c4\u203ast\u00c3\u00ad M\u00c3\u00adru",
+            "url": "https://www.youtube.com/live/PhabvW8rOas?si=bODft3kzrO3faBEx"
+        },
+        {
+            "name": "EarthCam Live: Allegiant Stadium (Las Vegas, NV)",
+            "url": "https://www.youtube.com/live/_rmUXOHSf0w?si=uxAnH5DOiMIa72CM"
+        },
+        {
+            "name": "B\u00c3\u00a2rlad Online www.b-o.ro Livecam 4K",
+            "url": "https://www.youtube.com/live/jJ9QfuZRhIk?si=JEued2LLG05L1znK"
+        },
+        {
+            "name": "Hamptons.com - LIVE! 4K Main Street, Sag Harbor Village, New York",
+            "url": "https://www.youtube.com/live/sxZxz0OPoh0?si=Ga9ndrW-M05i1c5Q"
+        },
+        {
+            "name": "C\u00c3\u00a1mara en vivo | UADE Campus Buenos Aires",
+            "url": "https://www.youtube.com/live/rqBfiegG5qU?si=bqmfzKsPbhihClvs"
+        },
+        {
+            "name": "Pattaya Beach Road, Thailand | Live Camera Stream",
+            "url": "https://www.youtube.com/live/oFARVBFbn34?si=KWTkN1CiR1_XZM6y"
+        },
+        {
+            "name": "LIVE OBOR SQUARE, BUCHAREST, ROMANIA",
+            "url": "https://www.youtube.com/live/S2o5AUbHGs0?si=2fdYlC0rsMCjTYXr"
+        },
+        {
+            "name": "Live Traffic @ 741 & 73",
+            "url": "https://www.youtube.com/live/2juLrCH5w9U?si=32d3KopUMMhbFYCt"
+        }
     ],
-
     "time_slots": [
         {
             "start": "00:00",
             "end": "04:00",
-            "streams": [
-                
-            ]
+            "streams": []
         },
         {
             "start": "04:00",
             "end": "08:00",
             "streams": [
-                { "name": "City of Orange Plaza-California, US", "url": "https://www.youtube.com/live/AShvF9ILGkc?si=krlXWd8zhdykJeLd", "animation": "california_animation.mp4", "thumbnail": "california.jpg" },
-
-                { "name": "Fresno-California, USA", "url": "https://www.youtube.com/live/1xl0hX-nF2E?si=Jslnzl0yMy9N-q23", "animation": "california_animation.mp4", "thumbnail": "california.jpg" },
-
-                { "name": "Fort Morgan-Colorado, USA", "url": "https://www.youtube.com/live/R3nGpwWDAHg?si=dmv-A7MDF-monU89", "animation": "colorado_animation.mp4", "thumbnail": "colorado.jpg" },
-
-                { "name": "The Villages-Florida, USA", "url": "https://www.youtube.com/live/WY2t935xDqM?si=aKJKt4NaGo1UzOGE", "animation": "florida_animation.mp4", "thumbnail": "florida.jpg" },
-
-                { "name": "Bellevue-Iowa, USA", "url": "https://www.youtube.com/live/ZyW1tTwBDeg?si=gTdoVjYHKVgYYPyD", "animation": "iowa_animation.mp4", "thumbnail": "iowa.jpg" },
-
-                { "name": "Las Vegas-New Mexico, USA", "url": "https://www.youtube.com/live/sw8MuxrKcs8?si=r8m3gpi9506gSkFQ", "animation": "newmexico_animation.mp4", "thumbnail": "newmexico.jpg" },
-
-                { "name": "Vicksburg-Michigan, USA", "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=J2v0WxuSXoqgRKzR", "animation": "michigan_animation.mp4", "thumbnail": "michigan.jpg" },
-
-                { "name": "Traverse City-Michigan, USA", "url": "https://www.youtube.com/live/8-V9uEqFLwE?si=aNIEm3C82oYHhCAA", "animation": "michigan_animation.mp4", "thumbnail": "michigan.jpg" },
-
-                { "name": "Park Rapids-Minnesota, USA", "url": "https://www.youtube.com/live/4lN2PQEDtfY?si=41tWnUlYC358eU7s", "animation": "minnesota_animation.mp4", "thumbnail": "minnesota.jpg" },
-
-                { "name": "Apex-North Carolina, USA", "url": "https://www.youtube.com/live/-MWn7E2O-_o?si=JbOLCj3RD43Vpjc1", "animation": "northcarolina_animation.mp4", "thumbnail": "northcarolina.jpg" },
-
-                { "name": "Charles Austin, Hopkins", "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt", "animation": "hopkins_animation.mp4", "thumbnail": "hopkins.jpg" },
-                { "name": "Northern Ring Road - Papal Gate, Vatican City", "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S", "animation": "egypt_animation.mp4", "thumbnail": "egypt.jpg" },
-                { "name": "Sapporo City, Japan", "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1", "animation": "sapporo_animation.mp4", "thumbnail": "sapporo.jpg" },
-                { "name": "Sapporo City 2, Japan", "url": "https://www.youtube.com/live/AWVVYHfxZac?si=SYf6IiLEUJr3fZF-", "animation": "sapporo_animation.mp4", "thumbnail": "sapporo.jpg" }
+                {
+                    "name": "City of Orange Plaza-California, US",
+                    "url": "https://www.youtube.com/live/AShvF9ILGkc?si=krlXWd8zhdykJeLd",
+                    "animation": "california_animation.mp4",
+                    "thumbnail": "california.jpg",
+                    "lat": 33.7879,
+                    "lng": -117.8531
+                },
+                {
+                    "name": "Fresno-California, USA",
+                    "url": "https://www.youtube.com/live/1xl0hX-nF2E?si=Jslnzl0yMy9N-q23",
+                    "animation": "california_animation.mp4",
+                    "thumbnail": "california.jpg",
+                    "lat": 36.7378,
+                    "lng": -119.7871
+                },
+                {
+                    "name": "Fort Morgan-Colorado, USA",
+                    "url": "https://www.youtube.com/live/R3nGpwWDAHg?si=dmv-A7MDF-monU89",
+                    "animation": "colorado_animation.mp4",
+                    "thumbnail": "colorado.jpg",
+                    "lat": 40.2502,
+                    "lng": -103.7997
+                },
+                {
+                    "name": "The Villages-Florida, USA",
+                    "url": "https://www.youtube.com/live/WY2t935xDqM?si=aKJKt4NaGo1UzOGE",
+                    "animation": "florida_animation.mp4",
+                    "thumbnail": "florida.jpg",
+                    "lat": 28.9348,
+                    "lng": -81.9601
+                },
+                {
+                    "name": "Bellevue-Iowa, USA",
+                    "url": "https://www.youtube.com/live/ZyW1tTwBDeg?si=gTdoVjYHKVgYYPyD",
+                    "animation": "iowa_animation.mp4",
+                    "thumbnail": "iowa.jpg",
+                    "lat": 42.2586,
+                    "lng": -90.4218
+                },
+                {
+                    "name": "Las Vegas-New Mexico, USA",
+                    "url": "https://www.youtube.com/live/sw8MuxrKcs8?si=r8m3gpi9506gSkFQ",
+                    "animation": "newmexico_animation.mp4",
+                    "thumbnail": "newmexico.jpg",
+                    "lat": 35.5942,
+                    "lng": -105.2225
+                },
+                {
+                    "name": "Vicksburg-Michigan, USA",
+                    "url": "https://www.youtube.com/live/cSYqmZWTHMU?si=J2v0WxuSXoqgRKzR",
+                    "animation": "michigan_animation.mp4",
+                    "thumbnail": "michigan.jpg",
+                    "lat": 42.12,
+                    "lng": -85.8533
+                },
+                {
+                    "name": "Traverse City-Michigan, USA",
+                    "url": "https://www.youtube.com/live/8-V9uEqFLwE?si=aNIEm3C82oYHhCAA",
+                    "animation": "michigan_animation.mp4",
+                    "thumbnail": "michigan.jpg",
+                    "lat": 44.7631,
+                    "lng": -85.6206
+                },
+                {
+                    "name": "Park Rapids-Minnesota, USA",
+                    "url": "https://www.youtube.com/live/4lN2PQEDtfY?si=41tWnUlYC358eU7s",
+                    "animation": "minnesota_animation.mp4",
+                    "thumbnail": "minnesota.jpg",
+                    "lat": 46.9222,
+                    "lng": -95.0536
+                },
+                {
+                    "name": "Apex-North Carolina, USA",
+                    "url": "https://www.youtube.com/live/-MWn7E2O-_o?si=JbOLCj3RD43Vpjc1",
+                    "animation": "northcarolina_animation.mp4",
+                    "thumbnail": "northcarolina.jpg",
+                    "lat": 35.7327,
+                    "lng": -78.8503
+                },
+                {
+                    "name": "Charles Austin, Hopkins",
+                    "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt",
+                    "animation": "hopkins_animation.mp4",
+                    "thumbnail": "hopkins.jpg",
+                    "lat": 30.5083,
+                    "lng": -94.8277
+                },
+                {
+                    "name": "Northern Ring Road - Papal Gate, Vatican City",
+                    "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S",
+                    "animation": "egypt_animation.mp4",
+                    "thumbnail": "egypt.jpg",
+                    "lat": 30.0444,
+                    "lng": 31.2357
+                },
+                {
+                    "name": "Sapporo City, Japan",
+                    "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1",
+                    "animation": "sapporo_animation.mp4",
+                    "thumbnail": "sapporo.jpg",
+                    "lat": 43.0618,
+                    "lng": 141.3545
+                },
+                {
+                    "name": "Sapporo City 2, Japan",
+                    "url": "https://www.youtube.com/live/AWVVYHfxZac?si=SYf6IiLEUJr3fZF-",
+                    "animation": "sapporo_animation.mp4",
+                    "thumbnail": "sapporo.jpg",
+                    "lat": 43.0618,
+                    "lng": 141.3545
+                }
             ]
         },
         {
             "start": "08:00",
             "end": "12:00",
             "streams": [
-                { "name": "Charles Austin, Hopkins", "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt", "animation": "hopkins_animation.mp4", "thumbnail": "hopkins.jpg" },
-                { "name": "Tokyo Shinjuku", "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Tokyo Shinjuku Kabukicho", "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Shibuya Scramble Crossing - Tokyo, Japan", "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Aomori City (Yanagimachi Intersection)", "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl", "animation": "aomori_animation.mp4", "thumbnail": "aomori.jpg" },
-                { "name": "Russia Petersburg", "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI", "animation": "russia_animation.mp4", "thumbnail": "russia.jpg" }
+                {
+                    "name": "Charles Austin, Hopkins",
+                    "url": "https://www.youtube.com/live/qRYILPnsOns?si=vvgHEUFEJZwljhHt",
+                    "animation": "hopkins_animation.mp4",
+                    "thumbnail": "hopkins.jpg",
+                    "lat": 30.5083,
+                    "lng": -94.8277
+                },
+                {
+                    "name": "Tokyo Shinjuku",
+                    "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "tokyo.jpg",
+                    "lat": 35.6938,
+                    "lng": 139.7034
+                },
+                {
+                    "name": "Tokyo Shinjuku Kabukicho",
+                    "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "tokyo.jpg",
+                    "lat": 35.6938,
+                    "lng": 139.7034
+                },
+                {
+                    "name": "Shibuya Scramble Crossing - Tokyo, Japan",
+                    "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "tokyo.jpg",
+                    "lat": 35.6595,
+                    "lng": 139.7004
+                },
+                {
+                    "name": "Aomori City (Yanagimachi Intersection)",
+                    "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl",
+                    "animation": "aomori_animation.mp4",
+                    "thumbnail": "aomori.jpg",
+                    "lat": 40.8244,
+                    "lng": 140.74
+                },
+                {
+                    "name": "Russia Petersburg",
+                    "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI",
+                    "animation": "russia_animation.mp4",
+                    "thumbnail": "russia.jpg",
+                    "lat": 59.9343,
+                    "lng": 30.3351
+                }
             ]
         },
         {
             "start": "12:00",
             "end": "16:00",
             "streams": [
-                
-                { "name": "Tokyo Shinjuku", "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Tokyo Shinjuku Kabukicho", "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Shibuya Scramble Crossing - Tokyo, Japan", "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT", "animation": "tokyo_animation.mp4", "thumbnail": "tokyo.jpg" },
-                { "name": "Aomori City (Yanagimachi Intersection)", "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl", "animation": "aomori_animation.mp4", "thumbnail": "aomori.jpg" },
-                { "name": "Russia Petersburg", "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI", "animation": "russia_animation.mp4", "thumbnail": "russia.jpg" },
-                { "name": "Northern Ring Road - Papal Gate, Vatican City", "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S", "animation": "egypt_animation.mp4", "thumbnail": "egypt.jpg" },
-                { "name": "Town Quay Southampton", "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ", "animation": "southampton_animation.mp4", "thumbnail": "southampton.jpg" },
-                { "name": "Capelle aan den IJssel, Netherlands", "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1", "animation": "netherlands_animation.mp4", "thumbnail": "netherlands.jpg" },
-                { "name": "Sapporo City, Japan", "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1", "animation": "sapporo_animation.mp4", "thumbnail": "sapporo.jpg" },
-                { "name": "El Gaucho - Bangkok, Thailand", "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A", "animation": "bangkok_animation.mp4", "thumbnail": "bangkok.jpg" },
-                { "name": "Patong-Phuket, Thailand", "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0", "animation": "phuket_animation.mp4", "thumbnail": "phuket.jpg" }
+                {
+                    "name": "Tokyo Shinjuku",
+                    "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Shinjuku.mp4",
+                    "lat": 35.7015889,
+                    "lng": 139.7091973
+                },
+                {
+                    "name": "Tokyo Shinjuku Kabukicho",
+                    "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Kabukicho.mp4",
+                    "lat": 35.7015889,
+                    "lng": 139.7091973
+                },
+                {
+                    "name": "Shibuya Scramble Crossing - Tokyo, Japan",
+                    "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Shibuya.mp4",
+                    "lat": 35.7015889,
+                    "lng": 139.7091973
+                },
+                {
+                    "name": "Aomori City (Yanagimachi Intersection)",
+                    "url": "https://www.youtube.com/live/XyqzzI_vSCo?si=XBQ2yn8wNnsLxGcl",
+                    "animation": "aomori_animation.mp4",
+                    "thumbnail": "",
+                    "lat": 40.8221236,
+                    "lng": 138.5073853
+                },
+                {
+                    "name": "Russia Petersburg",
+                    "url": "https://www.youtube.com/live/WN2VDFMvCJI?si=KhhUl1KLvarNxxOI",
+                    "animation": "russia_animation.mp4",
+                    "thumbnail": "russia.jpg",
+                    "lat": 59.9310653,
+                    "lng": 30.2908516
+                },
+                {
+                    "name": "Northern Ring Road - Papal Gate, Vatican City",
+                    "url": "https://www.youtube.com/live/z545k7Tcb5o?si=6oSonXONlIlkRd9S",
+                    "animation": "egypt_animation.mp4",
+                    "thumbnail": "egypt.jpg",
+                    "lat": 30.0444,
+                    "lng": 31.2357
+                },
+                {
+                    "name": "Town Quay Southampton",
+                    "url": "https://www.youtube.com/live/u7GyFcQJs98?si=3ujzVhVQMfJs-juJ",
+                    "animation": "southampton_animation.mp4",
+                    "thumbnail": "southampton.jpg",
+                    "lat": 50.8958,
+                    "lng": -1.4044
+                },
+                {
+                    "name": "Capelle aan den IJssel, Netherlands",
+                    "url": "https://www.youtube.com/live/Jy1Y9f8NEY0?si=qDFs4iCvJF-4I0l1",
+                    "animation": "netherlands_animation.mp4",
+                    "thumbnail": "netherlands.jpg",
+                    "lat": 51.9292,
+                    "lng": 4.578
+                },
+                {
+                    "name": "Sapporo City, Japan",
+                    "url": "https://www.youtube.com/live/6DhFMy_i8bg?si=xESR6EFdInsGdVl1",
+                    "animation": "sapporo_animation.mp4",
+                    "thumbnail": "sapporo.jpg",
+                    "lat": 43.0618,
+                    "lng": 141.3545
+                },
+                {
+                    "name": "El Gaucho - Bangkok, Thailand",
+                    "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A",
+                    "animation": "bangkok_animation.mp4",
+                    "thumbnail": "bangkok.jpg",
+                    "lat": 13.7563,
+                    "lng": 100.5018
+                },
+                {
+                    "name": "Patong-Phuket, Thailand",
+                    "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0",
+                    "animation": "phuket_animation.mp4",
+                    "thumbnail": "phuket.mp4",
+                    "lat": 7.8804,
+                    "lng": 98.292
+                }
             ]
         },
         {
             "start": "16:00",
             "end": "20:00",
             "streams": [
-                { "name": "Derry-New Hampshire, USA", "url": "https://www.youtube.com/live/UWkwZ2hj84I?si=10SMFb-SSAHuufGP", "animation": "newhampshire_animation.mp4", "thumbnail": "newhampshire.jpg" },
-
-                { "name": "Tokyo Shinjuku", "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5", "animation": "tokyo_animation.mp4", "thumbnail": "Shinjuku.jpg" },
-                { "name": "Tokyo Shinjuku Kabukicho", "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y", "animation": "tokyo_animation.mp4", "thumbnail": "Kabukicho.jpg" },
-                { "name": "Shibuya Scramble Crossing - Tokyo, Japan", "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT", "animation": "tokyo_animation.mp4", "thumbnail": "Shibuya.jpg" }
+                {
+                    "name": "Derry-New Hampshire, USA",
+                    "url": "https://www.youtube.com/live/UWkwZ2hj84I?si=10SMFb-SSAHuufGP",
+                    "animation": "newhampshire_animation.mp4",
+                    "thumbnail": "newhampshire.mp4",
+                    "lat": 42.8806,
+                    "lng": -71.3273
+                },
+                {
+                    "name": "Tokyo Shinjuku",
+                    "url": "https://www.youtube.com/live/6dp-bvQ7RWo?si=donm88l-pp-KsxA5",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Shinjuku.mp4",
+                    "lat": 35.6938,
+                    "lng": 139.7034
+                },
+                {
+                    "name": "Tokyo Shinjuku Kabukicho",
+                    "url": "https://www.youtube.com/live/gTO_FJzv70k?si=MPI4sNG1b6Aff20y",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Kabukicho.mp4",
+                    "lat": 35.6938,
+                    "lng": 139.7034
+                },
+                {
+                    "name": "Shibuya Scramble Crossing - Tokyo, Japan",
+                    "url": "https://www.youtube.com/live/dfVK7ld38Ys?si=yCJEg6KH9mg84PJT",
+                    "animation": "tokyo_animation.mp4",
+                    "thumbnail": "Shibuya.mp4",
+                    "lat": 35.6595,
+                    "lng": 139.7004
+                },
+                {
+                    "name": "Patong-Phuket, Thailand",
+                    "url": "https://www.youtube.com/live/WSm_r0eNl1E?si=8IuvyP28Ro37rbx0",
+                    "animation": "phuket_animation.mp4",
+                    "thumbnail": "phuket.mp4",
+                    "lat": 7.8804,
+                    "lng": 98.292
+                },
+                {
+                    "name": "El Gaucho - Bangkok, Thailand",
+                    "url": "https://www.youtube.com/live/Q71sLS8h9a4?si=_eVe0M-TOv_r9g_A",
+                    "animation": "bangkok_animation.mp4",
+                    "thumbnail": "bangkok.mp4",
+                    "lat": 13.7563,
+                    "lng": 100.5018
+                }
             ]
         },
         {
             "start": "20:00",
             "end": "00:00",
             "streams": [
-                { "name": "San Marcos-Texas, US", "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU", "animation": "sanmarcos_animation.mp4", "thumbnail": "sanmarcos.jpg" },
-
-                { "name": "San Marcos-Texas 2, US", "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE", "animation": "sanmarcos_animation.mp4", "thumbnail": "sanmarcos.jpg" },
-
-                { "name": "San Marcos-Texas 3, US", "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB", "animation": "sanmarcos_animation.mp4", "thumbnail": "sanmarcos.jpg" },
-
-                { "name": "Tilton-New Hampshire, USA", "url": "https://www.youtube.com/live/auWahQLydIk?si=KPjQE2FYqIJktzpa", "animation": "newhampshire_animation.mp4", "thumbnail": "newhampshire.jpg" },
-
-                { "name": "North Conway-New Hampshire, USA", "url": "https://www.youtube.com/live/H8bFFw-0ZQE?si=ODd5QFWNDG2elbh7", "animation": "newhampshire_animation.mp4", "thumbnail": "newhampshire.jpg" },
-
-                { "name": "Watertown-New York, USA", "url": "https://www.youtube.com/live/Zz9hMrxl20I?si=FhTcsP6afHiR7PsX", "animation": "newyork_animation.mp4", "thumbnail": "newyork.jpg" },
-                { "name": "Montauk-New York, USA", "url": "https://www.youtube.com/live/LL6HrtRsR3o?si=YmLR0kxGI8Rua4Ac", "animation": "newyork_animation.mp4", "thumbnail": "newyork.jpg" },
-                { "name": "Fort Erie-Ontario, Canada", "url": "https://www.youtube.com/live/DnUFAShZKus?si=t5lZpbceuh8Kzl8u", "animation": "canada_animation.mp4", "thumbnail": "canada.jpg" }
-
-                
+                {
+                    "name": "San Marcos-Texas, US",
+                    "url": "https://www.youtube.com/live/fiUqVsMR8z4?si=WZ_yb28jiPnvNAhU",
+                    "animation": "sanmarcos_animation.mp4",
+                    "thumbnail": "sanmarcos.jpg",
+                    "lat": 29.8833,
+                    "lng": -97.9414
+                },
+                {
+                    "name": "San Marcos-Texas 2, US",
+                    "url": "https://www.youtube.com/live/S_o0_F9BiuY?si=zRVttL-WvFU32zcE",
+                    "animation": "sanmarcos_animation.mp4",
+                    "thumbnail": "sanmarcos.jpg",
+                    "lat": 29.8833,
+                    "lng": -97.9414
+                },
+                {
+                    "name": "San Marcos-Texas 3, US",
+                    "url": "https://www.youtube.com/live/bYd6ChdCblg?si=BM8Y7ojWso9PIJzB",
+                    "animation": "sanmarcos_animation.mp4",
+                    "thumbnail": "sanmarcos.jpg",
+                    "lat": 29.8833,
+                    "lng": -97.9414
+                },
+                {
+                    "name": "Tilton-New Hampshire, USA",
+                    "url": "https://www.youtube.com/live/auWahQLydIk?si=KPjQE2FYqIJktzpa",
+                    "animation": "newhampshire_animation.mp4",
+                    "thumbnail": "newhampshire.jpg",
+                    "lat": 43.4426,
+                    "lng": -71.5887
+                },
+                {
+                    "name": "North Conway-New Hampshire, USA",
+                    "url": "https://www.youtube.com/live/H8bFFw-0ZQE?si=ODd5QFWNDG2elbh7",
+                    "animation": "newhampshire_animation.mp4",
+                    "thumbnail": "newhampshire.jpg",
+                    "lat": 44.0537,
+                    "lng": -71.1284
+                },
+                {
+                    "name": "Watertown-New York, USA",
+                    "url": "https://www.youtube.com/live/Zz9hMrxl20I?si=FhTcsP6afHiR7PsX",
+                    "animation": "newyork_animation.mp4",
+                    "thumbnail": "newyork.jpg",
+                    "lat": 43.9748,
+                    "lng": -75.9108
+                },
+                {
+                    "name": "Montauk-New York, USA",
+                    "url": "https://www.youtube.com/live/LL6HrtRsR3o?si=YmLR0kxGI8Rua4Ac",
+                    "animation": "newyork_animation.mp4",
+                    "thumbnail": "newyork.jpg",
+                    "lat": 41.0362,
+                    "lng": -71.9545
+                },
+                {
+                    "name": "Fort Erie-Ontario, Canada",
+                    "url": "https://www.youtube.com/live/DnUFAShZKus?si=t5lZpbceuh8Kzl8u",
+                    "animation": "canada_animation.mp4",
+                    "thumbnail": "canada.jpg",
+                    "lat": 42.9061,
+                    "lng": -79.0134
+                }
             ]
         }
     ]

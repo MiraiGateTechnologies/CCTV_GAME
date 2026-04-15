@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Globe Animation Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; width: 100vw; height: 100vh; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { width: 100%; height: 100%; display: block; }
+
+        #controls {
+            position: absolute; top: 10px; left: 10px; z-index: 100;
+            background: rgba(0,0,0,0.8); padding: 15px; border-radius: 10px;
+            color: #fff; font-size: 13px;
+        }
+        #controls input, #controls button, #controls select {
+            padding: 6px 10px; margin: 3px; border-radius: 5px; border: 1px solid #444;
+            background: #1a1a2e; color: #fff; font-size: 13px;
+        }
+        #controls button { background: #e63946; border: none; cursor: pointer; font-weight: bold; }
+        #controls button:hover { background: #c5303c; }
+        #controls label { display: block; margin-top: 8px; color: #aaa; font-size: 11px; }
+
+        #thumbnail-overlay {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center; z-index: 20; display: none;
+        }
+        #thumbnail-overlay .name {
+            color: #fff; font-size: 22px; font-weight: 700;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+        }
+        #thumbnail-overlay .subtitle {
+            color: #00dca0; font-size: 14px; margin-top: 5px;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+        }
+
+        #timer-overlay {
+            position: absolute; top: 12px; right: 12px;
+            width: 44px; height: 44px; z-index: 30;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="globe-canvas"></canvas>
+
+    <div id="controls">
+        <b>Globe Animation Test</b>
+        <label>Preset Cities:</label>
+        <select id="citySelect">
+            <option value="">-- Pick a city --</option>
+            <option value="35.6938,139.7034,Tokyo Shinjuku">Tokyo, Japan</option>
+            <option value="40.7128,-74.0060,New York City">New York, USA</option>
+            <option value="51.5074,-0.1278,London">London, UK</option>
+            <option value="59.9343,30.3351,Saint Petersburg">Russia Petersburg</option>
+            <option value="13.7563,100.5018,Bangkok">Bangkok, Thailand</option>
+            <option value="29.8833,-97.9414,San Marcos">San Marcos, Texas</option>
+            <option value="43.0618,141.3545,Sapporo">Sapporo, Japan</option>
+            <option value="33.7879,-117.8531,Orange Plaza">California, USA</option>
+            <option value="-33.8688,151.2093,Sydney">Sydney, Australia</option>
+            <option value="19.0760,72.8777,Mumbai">Mumbai, India</option>
+            <option value="48.8566,2.3522,Paris">Paris, France</option>
+            <option value="30.0444,31.2357,Cairo">Cairo, Egypt</option>
+            <option value="55.7558,37.6173,Moscow">Moscow, Russia</option>
+            <option value="-22.9068,-43.1729,Rio de Janeiro">Rio, Brazil</option>
+            <option value="1.3521,103.8198,Singapore">Singapore</option>
+        </select>
+
+        <label>Custom Lat/Lng:</label>
+        <input type="number" id="lat" placeholder="Latitude" step="0.001" value="35.6938" style="width:100px">
+        <input type="number" id="lng" placeholder="Longitude" step="0.001" value="139.7034" style="width:100px">
+        <input type="text" id="cityName" placeholder="City Name" value="Tokyo" style="width:120px">
+
+        <br>
+        <button id="flyBtn">Fly to City (15s)</button>
+        <button id="resetBtn" style="background:#555">Reset</button>
+    </div>
+
+    <div id="thumbnail-overlay">
+        <div class="name" id="thumb-name"></div>
+        <div class="subtitle">NEXT STREAM</div>
+    </div>
+
+    <canvas id="timer-overlay" width="44" height="44"></canvas>
+
+    <!-- Three.js + TWEEN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tweenjs/tween.js@18/dist/tween.umd.js"></script>
+
+    <script>
+    // ── Globe Setup ──
+    const canvas = document.getElementById('globe-canvas');
+    const thumbOverlay = document.getElementById('thumbnail-overlay');
+    const thumbName = document.getElementById('thumb-name');
+    const timerCanvas = document.getElementById('timer-overlay');
+    const timerCtx = timerCanvas.getContext('2d');
+
+    let scene, camera, renderer, earth, pinGroup;
+    let animating = false;
+    let bettingStart = 0;
+
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 3.5);
+
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        // Stars
+        const starGeo = new THREE.BufferGeometry();
+        const v = [];
+        for (let i = 0; i < 3000; i++) {
+            v.push((Math.random()-0.5)*100, (Math.random()-0.5)*100, (Math.random()-0.5)*100);
+        }
+        starGeo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+        scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.08 })));
+
+        // Earth — use local file path (relative to this HTML)
+        const loader = new THREE.TextureLoader();
+        const tex = loader.load('../static/earth_night.jpg');
+        earth = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 64, 64),
+            new THREE.MeshBasicMaterial({ map: tex })
+        );
+        scene.add(earth);
+
+        // Atmosphere
+        const atmos = new THREE.Mesh(
+            new THREE.SphereGeometry(1.02, 64, 64),
+            new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.08, side: THREE.BackSide })
+        );
+        scene.add(atmos);
+
+        pinGroup = new THREE.Group();
+        scene.add(pinGroup);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        TWEEN.update();
+        if (!animating) earth.rotation.y += 0.001;
+
+        // Timer update during betting
+        if (bettingStart > 0) {
+            const elapsed = (Date.now() - bettingStart) / 1000;
+            const remaining = Math.max(0, 15 - elapsed);
+            drawTimer(remaining, 15, '#ffd700');
+            if (remaining <= 0) bettingStart = 0;
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    function latLngToVec3(lat, lng, r) {
+        const phi = (90 - lat) * Math.PI / 180;
+        const theta = (lng + 180) * Math.PI / 180;
+        return new THREE.Vector3(
+            -(r * Math.sin(phi) * Math.cos(theta)),
+            r * Math.cos(phi),
+            r * Math.sin(phi) * Math.sin(theta)
+        );
+    }
+
+    function flyToCity(lat, lng, name) {
+        animating = true;
+        bettingStart = Date.now();
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        thumbOverlay.style.display = 'none';
+
+        const target = latLngToVec3(lat, lng, 1);
+        const camEnd = { x: target.x * 2.2, y: target.y * 2.2, z: target.z * 2.2 };
+
+        // Fly camera (2-8s)
+        new TWEEN.Tween(camera.position)
+            .to(camEnd, 6000).delay(2000)
+            .easing(TWEEN.Easing.Cubic.InOut)
+            .onUpdate(() => camera.lookAt(0, 0, 0))
+            .start();
+
+        // Pin drop (8s)
+        setTimeout(() => {
+            const pos = latLngToVec3(lat, lng, 1.01);
+            const pin = new THREE.Mesh(
+                new THREE.SphereGeometry(0.02, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff3344 })
+            );
+            pin.position.copy(pos);
+            pinGroup.add(pin);
+
+            const ring = new THREE.Mesh(
+                new THREE.RingGeometry(0.03, 0.05, 32),
+                new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+            );
+            ring.position.copy(pos);
+            ring.lookAt(0, 0, 0);
+            pinGroup.add(ring);
+
+            const pulse = () => {
+                new TWEEN.Tween(ring.scale).to({x:1.5,y:1.5,z:1.5}, 800)
+                    .easing(TWEEN.Easing.Cubic.Out)
+                    .chain(new TWEEN.Tween(ring.scale).to({x:1,y:1,z:1}, 800).easing(TWEEN.Easing.Cubic.In).onComplete(pulse))
+                    .start();
+            };
+            pulse();
+        }, 8000);
+
+        // Thumbnail (11s)
+        setTimeout(() => {
+            thumbName.textContent = name;
+            thumbOverlay.style.display = 'block';
+        }, 11000);
+    }
+
+    function resetGlobe() {
+        animating = false;
+        bettingStart = 0;
+        thumbOverlay.style.display = 'none';
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        camera.position.set(0, 0, 3.5);
+        camera.lookAt(0, 0, 0);
+        drawTimer(0, 1, '#666');
+    }
+
+    function drawTimer(remaining, total, color) {
+        const w = 44, h = 44, cx = 22, cy = 22, r = 18;
+        timerCtx.clearRect(0, 0, w, h);
+        timerCtx.beginPath(); timerCtx.arc(cx, cy, r, 0, Math.PI*2);
+        timerCtx.fillStyle = 'rgba(30,30,30,0.8)'; timerCtx.fill();
+        const ratio = total > 0 ? remaining / total : 0;
+        if (ratio > 0) {
+            timerCtx.beginPath();
+            timerCtx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + Math.PI*2*ratio);
+            timerCtx.strokeStyle = color; timerCtx.lineWidth = 3; timerCtx.stroke();
+        }
+        timerCtx.fillStyle = '#fff'; timerCtx.font = 'bold 14px Segoe UI';
+        timerCtx.textAlign = 'center'; timerCtx.textBaseline = 'middle';
+        timerCtx.fillText(Math.ceil(remaining), cx, cy);
+    }
+
+    // ── Controls ──
+    document.getElementById('flyBtn').addEventListener('click', () => {
+        const lat = parseFloat(document.getElementById('lat').value);
+        const lng = parseFloat(document.getElementById('lng').value);
+        const name = document.getElementById('cityName').value;
+        resetGlobe();
+        setTimeout(() => flyToCity(lat, lng, name), 100);
+    });
+
+    document.getElementById('resetBtn').addEventListener('click', resetGlobe);
+
+    document.getElementById('citySelect').addEventListener('change', (e) => {
+        if (!e.target.value) return;
+        const [lat, lng, name] = e.target.value.split(',');
+        document.getElementById('lat').value = lat;
+        document.getElementById('lng').value = lng;
+        document.getElementById('cityName').value = name;
+        resetGlobe();
+        setTimeout(() => flyToCity(parseFloat(lat), parseFloat(lng), name), 100);
+    });
+
+    // ── Init ──
+    init();
+    drawTimer(0, 1, '#666');
+    </script>
+</body>
+</html>

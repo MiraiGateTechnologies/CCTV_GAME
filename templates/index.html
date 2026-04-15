@@ -3,152 +3,466 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>CCTV Casino Game — Live</title>
+    <title>CCTV Rush Hour</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; width: 100vw; height: 100vh; overflow: hidden; }
 
-        body {
-            background: #000;
-            width: 100vw;
-            height: 100vh;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: env(safe-area-inset-top) env(safe-area-inset-right)
-                     env(safe-area-inset-bottom) env(safe-area-inset-left);
+        /* Both layers always in DOM — switch with z-index (no display toggle) */
+        #globe-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; /* on top during BETTING */
+        }
+        #stream-container {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 5; /* behind globe during BETTING */
+        }
+        #livekit-video {
+            width: 100%; height: 100%;
+            object-fit: contain; display: block;
+        }
+        #globe-canvas { width: 100%; height: 100%; display: block; }
+
+        /* Thumbnail overlay */
+        #thumbnail-overlay {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center; z-index: 25; display: none;
+        }
+        #thumbnail-overlay img, #thumbnail-overlay video {
+            max-width: 220px; max-height: 130px;
+            border-radius: 10px; border: 2px solid rgba(255,255,255,0.3);
+            margin-bottom: 10px; display: block; margin-left: auto; margin-right: auto;
+        }
+        .thumb-name {
+            color: #fff; font-size: 20px; font-weight: 700;
+            font-family: 'Segoe UI', sans-serif;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+        }
+        .thumb-subtitle {
+            color: #00dca0; font-size: 13px; margin-top: 4px;
+            font-family: 'Segoe UI', sans-serif;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.6);
         }
 
-        .stream-container {
-            position: relative;
-            width: 100%;
-            height: 100%;
-            max-width: 100vw;
-            max-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #000;
-        }
-
-        #video-feed, #livekit-video {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            display: block;
-        }
-
-        #livekit-video { display: none; }
-
-        /* Tiny glowing dot — top left corner */
+        /* Status dot */
         .status-dot {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            z-index: 10;
-            animation: glow 2s infinite;
+            position: absolute; top: 10px; left: 10px;
+            width: 8px; height: 8px; border-radius: 50%;
+            z-index: 50; animation: glow 2s infinite;
         }
+        .status-dot.connected { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+        .status-dot.betting { background: #ffd700; box-shadow: 0 0 6px #ffd700; }
+        .status-dot.disconnected { background: #ff4444; box-shadow: none; animation: none; }
+        @keyframes glow { 0%,100%{opacity:0.5} 50%{opacity:1} }
 
-        .status-dot.connected {
-            background: #00ff88;
-            box-shadow: 0 0 6px #00ff88, 0 0 12px #00ff8844;
-        }
-
-        .status-dot.mjpeg {
-            background: #ffcc00;
-            box-shadow: 0 0 6px #ffcc00, 0 0 12px #ffcc0044;
-        }
-
-        .status-dot.disconnected {
-            background: #ff4444;
-            box-shadow: none;
-            animation: none;
-        }
-
-        @keyframes glow {
-            0%, 100% { opacity: 0.5; }
-            50% { opacity: 1; }
-        }
-
-        /* Mobile: slightly smaller dot */
-        @media (max-width: 768px) {
-            .status-dot {
-                width: 6px;
-                height: 6px;
-                top: 6px;
-                left: 6px;
-            }
+        /* Timer */
+        #timer-overlay {
+            position: absolute; top: 12px; right: 12px;
+            width: 44px; height: 44px; z-index: 50;
         }
     </style>
 </head>
 <body>
-    <div class="stream-container">
-        <div class="status-dot disconnected" id="status-dot"></div>
+    <!-- Globe (BETTING phase) -->
+    <div id="globe-container"><canvas id="globe-canvas"></canvas></div>
 
-        <!-- MJPEG fallback (works always) -->
-        <img id="video-feed" src="/video_feed" alt="Live">
+    <!-- LiveKit stream (COUNTING + WAITING) — ALWAYS in DOM, never removed -->
+    <div id="stream-container"><video id="livekit-video" autoplay playsinline muted></video></div>
 
-        <!-- LiveKit WebRTC video (hidden until connected) -->
-        <video id="livekit-video" autoplay playsinline muted></video>
+    <!-- Thumbnail overlay -->
+    <div id="thumbnail-overlay">
+        <img id="thumb-img" src="" alt="" style="display:none">
+        <div class="thumb-name" id="thumb-name"></div>
+        <div class="thumb-subtitle">NEXT STREAM</div>
     </div>
 
-    <!-- LiveKit JS SDK -->
+    <!-- Timer -->
+    <canvas id="timer-overlay" width="44" height="44"></canvas>
+
+    <!-- Status dot -->
+    <div class="status-dot disconnected" id="status-dot"></div>
+
+    <!-- Three.js + TWEEN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tweenjs/tween.js@18/dist/tween.umd.js"></script>
+    <!-- LiveKit -->
     <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.js"></script>
 
     <script>
-        const dot = document.getElementById('status-dot');
-        const mjpeg = document.getElementById('video-feed');
-        const lkVideo = document.getElementById('livekit-video');
+    // ══════════════════════════════════════════
+    //  CONFIG — adjustable timings
+    // ══════════════════════════════════════════
+    const THUMBNAIL_REVEAL_SEC = 6;   // When to show thumbnail (seconds into BETTING)
+    const BETTING_DURATION = 15;       // Total betting phase duration
+    const PIN_DROP_SEC = 8;            // When pin drops on globe
 
-        async function connectLiveKit() {
-            try {
-                const resp = await fetch('/api/livekit/token?identity=viewer-' + Date.now());
-                const data = await resp.json();
+    // ══════════════════════════════════════════
+    //  ELEMENTS
+    // ══════════════════════════════════════════
+    const globeContainer = document.getElementById('globe-container');
+    const streamContainer = document.getElementById('stream-container');
+    const lkVideo = document.getElementById('livekit-video');
+    const thumbOverlay = document.getElementById('thumbnail-overlay');
+    const thumbImg = document.getElementById('thumb-img');
+    const thumbName = document.getElementById('thumb-name');
+    const timerCanvas = document.getElementById('timer-overlay');
+    const timerCtx = timerCanvas.getContext('2d');
+    const dot = document.getElementById('status-dot');
 
-                if (data.error) {
-                    showMJPEG();
-                    return;
+    let currentPhase = 'IDLE';
+    let liveKitConnected = false;
+
+    // ══════════════════════════════════════════
+    //  THREE.JS GLOBE
+    // ══════════════════════════════════════════
+    let scene, camera, renderer, earth, pinGroup;
+    let globeRunning = false;
+
+    function initGlobe() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 3.5);
+
+        const canvas = document.getElementById('globe-canvas');
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        // Stars
+        const sv = [];
+        for (let i = 0; i < 3000; i++) sv.push((Math.random()-0.5)*100,(Math.random()-0.5)*100,(Math.random()-0.5)*100);
+        const sg = new THREE.BufferGeometry();
+        sg.setAttribute('position', new THREE.Float32BufferAttribute(sv, 3));
+        scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 0.08 })));
+
+        // Earth with NASA night texture
+        const tex = new THREE.TextureLoader().load('/static/earth_night.jpg');
+        earth = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 64, 64),
+            new THREE.MeshBasicMaterial({ map: tex })
+        );
+        scene.add(earth);
+
+        // Atmosphere
+        scene.add(new THREE.Mesh(
+            new THREE.SphereGeometry(1.02, 64, 64),
+            new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.08, side: THREE.BackSide })
+        ));
+
+        pinGroup = new THREE.Group();
+        scene.add(pinGroup);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    }
+
+    function startGlobeLoop() {
+        if (globeRunning) return;
+        globeRunning = true;
+        function loop() {
+            if (!globeRunning) return;  // STOPS when not needed
+            requestAnimationFrame(loop);
+            TWEEN.update();
+            renderer.render(scene, camera);
+        }
+        loop();
+    }
+
+    function stopGlobeLoop() {
+        globeRunning = false;
+    }
+
+    // FIX #2: Correct lat/lng to 3D — accounts for Three.js sphere UV mapping
+    function latLngToVector3(lat, lng, radius) {
+        const phi = (90 - lat) * (Math.PI / 180);
+        const theta = (lng + 180) * (Math.PI / 180);
+        return new THREE.Vector3(
+            -(radius * Math.sin(phi) * Math.cos(theta)),
+              radius * Math.cos(phi),
+              radius * Math.sin(phi) * Math.sin(theta)
+        );
+    }
+
+    function flyToCity(lat, lng, cityName, thumbnail) {
+        // Clear previous
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        thumbOverlay.style.display = 'none';
+
+        // FIX #2: Reset earth rotation and rotate earth so target city faces camera
+        // Instead of moving camera around the globe, rotate the earth to bring city to front
+        const targetOnSurface = latLngToVector3(lat, lng, 1);
+
+        // Calculate earth rotation to face city toward camera (camera stays at z=3.5)
+        // Target angle: the city should be at the front of the globe (facing +Z)
+        const targetTheta = Math.atan2(-targetOnSurface.x, targetOnSurface.z);
+        const targetPhi = Math.asin(targetOnSurface.y);
+
+        // Phase 1 (0-2s): Gentle slow rotation
+        earth.rotation.y = 0;
+        const startRotY = earth.rotation.y;
+
+        // Phase 2 (2-8s): Rotate earth to face city + camera zooms in
+        new TWEEN.Tween(earth.rotation)
+            .to({ y: targetTheta }, 5000)
+            .delay(2000)
+            .easing(TWEEN.Easing.Cubic.InOut)
+            .start();
+
+        // Camera: zoom from 3.5 to 2.0 (closer to globe)
+        new TWEEN.Tween(camera.position)
+            .to({ x: 0, y: targetOnSurface.y * 0.8, z: 2.0 }, 5000)
+            .delay(2000)
+            .easing(TWEEN.Easing.Cubic.InOut)
+            .onUpdate(() => camera.lookAt(0, 0, 0))
+            .start();
+
+        // Phase 3: Pin drop at PIN_DROP_SEC
+        setTimeout(() => {
+            // Recalculate pin position with current earth rotation
+            const pinPos = latLngToVector3(lat, lng, 1.01);
+            const pin = new THREE.Mesh(
+                new THREE.SphereGeometry(0.025, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff3344 })
+            );
+            pin.position.copy(pinPos);
+            pinGroup.add(pin);
+
+            // Glow ring
+            const ring = new THREE.Mesh(
+                new THREE.RingGeometry(0.04, 0.06, 32),
+                new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+            );
+            ring.position.copy(pinPos);
+            ring.lookAt(0, 0, 0);
+            pinGroup.add(ring);
+
+            // Pulse
+            (function pulse() {
+                new TWEEN.Tween(ring.scale).to({x:1.8,y:1.8,z:1.8}, 700)
+                    .easing(TWEEN.Easing.Cubic.Out)
+                    .chain(new TWEEN.Tween(ring.scale).to({x:1,y:1,z:1}, 700)
+                        .easing(TWEEN.Easing.Cubic.In).onComplete(pulse))
+                    .start();
+            })();
+        }, PIN_DROP_SEC * 1000);
+
+        // Phase 4: Thumbnail at THUMBNAIL_REVEAL_SEC
+        setTimeout(() => showThumbnail(cityName, thumbnail), THUMBNAIL_REVEAL_SEC * 1000);
+    }
+
+    // FIX #3: Thumbnail — supports both photo and video
+    function showThumbnail(cityName, thumbnail) {
+        // Hide previous
+        thumbImg.style.display = 'none';
+        let vid = document.getElementById('thumb-video');
+        if (vid) { vid.pause(); vid.style.display = 'none'; }
+
+        if (thumbnail) {
+            const ext = thumbnail.split('.').pop().toLowerCase();
+            const isVideo = ['mp4', 'webm', 'mov'].includes(ext);
+
+            if (isVideo) {
+                if (!vid) {
+                    vid = document.createElement('video');
+                    vid.id = 'thumb-video';
+                    vid.autoplay = true; vid.muted = true; vid.playsInline = true;
+                    vid.style.cssText = 'max-width:220px;max-height:130px;border-radius:10px;border:2px solid rgba(255,255,255,0.3);margin-bottom:10px;display:block;margin-left:auto;margin-right:auto;';
+                    thumbOverlay.insertBefore(vid, thumbOverlay.querySelector('.thumb-name'));
                 }
-
-                const room = new LivekitClient.Room();
-
-                room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
-                    if (track.kind === LivekitClient.Track.Kind.Video) {
-                        track.attach(lkVideo);
-                        showLiveKit();
-                    }
-                });
-
-                room.on(LivekitClient.RoomEvent.Disconnected, () => {
-                    showMJPEG();
-                    setTimeout(connectLiveKit, 5000);
-                });
-
-                await room.connect(data.url, data.token);
-
-            } catch (err) {
-                showMJPEG();
-                setTimeout(connectLiveKit, 10000);
+                vid.src = '/thumbnails/' + thumbnail;
+                vid.style.display = 'block';
+                vid.play().catch(() => {});
+            } else {
+                thumbImg.src = '/thumbnails/' + thumbnail;
+                thumbImg.style.display = 'block';
             }
         }
 
-        function showLiveKit() {
-            mjpeg.style.display = 'none';
-            lkVideo.style.display = 'block';
-            dot.className = 'status-dot connected';
+        thumbName.textContent = cityName || '';
+        thumbOverlay.style.display = 'block';
+    }
+
+    function resetGlobe() {
+        thumbOverlay.style.display = 'none';
+        const vid = document.getElementById('thumb-video');
+        if (vid) { vid.pause(); vid.style.display = 'none'; }
+        while (pinGroup.children.length) pinGroup.remove(pinGroup.children[0]);
+        earth.rotation.set(0, 0, 0);
+        camera.position.set(0, 0, 3.5);
+        camera.lookAt(0, 0, 0);
+        TWEEN.removeAll();
+    }
+
+    // ══════════════════════════════════════════
+    //  TIMER CIRCLE
+    // ══════════════════════════════════════════
+    function drawTimer(remaining, total, color) {
+        const w = 44, h = 44, cx = 22, cy = 22, r = 18;
+        timerCtx.clearRect(0, 0, w, h);
+        timerCtx.beginPath(); timerCtx.arc(cx, cy, r, 0, Math.PI*2);
+        timerCtx.fillStyle = 'rgba(30,30,30,0.8)'; timerCtx.fill();
+        const ratio = total > 0 ? remaining / total : 0;
+        if (ratio > 0) {
+            timerCtx.beginPath();
+            timerCtx.arc(cx, cy, r, -Math.PI/2, -Math.PI/2 + Math.PI*2*ratio);
+            timerCtx.strokeStyle = color; timerCtx.lineWidth = 3; timerCtx.stroke();
+        }
+        timerCtx.fillStyle = '#fff'; timerCtx.font = 'bold 14px Segoe UI';
+        timerCtx.textAlign = 'center'; timerCtx.textBaseline = 'middle';
+        timerCtx.fillText(Math.ceil(remaining), cx, cy);
+    }
+
+    // ══════════════════════════════════════════
+    //  FIX #1: PHASE SWITCHING — z-index, no display toggle
+    //  LiveKit video ALWAYS plays, never detached from DOM
+    // ══════════════════════════════════════════
+    function showGlobePhase() {
+        globeContainer.style.zIndex = '10';   // globe on top
+        streamContainer.style.zIndex = '5';    // stream behind (STILL PLAYING)
+        startGlobeLoop();                       // start rendering
+        dot.className = 'status-dot betting';
+    }
+
+    function showStreamPhase() {
+        globeContainer.style.zIndex = '1';    // globe behind
+        streamContainer.style.zIndex = '10';   // stream on top
+        stopGlobeLoop();                        // FREE GPU for LiveKit
+        thumbOverlay.style.display = 'none';
+        dot.className = liveKitConnected ? 'status-dot connected' : 'status-dot disconnected';
+    }
+
+    // ══════════════════════════════════════════
+    //  FIX #1: WebSocket for phase changes + timer
+    //  HTTP polling ONLY as fallback (every 2s, not 500ms)
+    // ══════════════════════════════════════════
+    let lastRoundId = '';
+    let bettingAnimStarted = false;
+    let wsConnected = false;
+
+    function handleGameData(data) {
+        const phase = data.phase;
+
+        // Timer
+        if (phase === 'BETTING') {
+            drawTimer(data.betting_timer || 0, BETTING_DURATION, '#ffd700');
+        } else if (phase === 'COUNTING') {
+            const ct = (data.round_timer || 0) - 6;
+            drawTimer(Math.max(0, ct), 35, '#00ff64');
+        } else if (phase === 'WAITING') {
+            drawTimer(data.waiting_timer || 0, 6, '#ff4466');
+        } else {
+            drawTimer(0, 1, '#666');
         }
 
-        function showMJPEG() {
-            mjpeg.style.display = 'block';
-            lkVideo.style.display = 'none';
-            dot.className = 'status-dot mjpeg';
+        // Phase switch: BETTING starts
+        if (phase === 'BETTING' && currentPhase !== 'BETTING') {
+            currentPhase = 'BETTING';
+            showGlobePhase();
+            bettingAnimStarted = false;
         }
 
-        showMJPEG();
-        connectLiveKit();
+        // Start globe animation (once per round)
+        if (phase === 'BETTING' && !bettingAnimStarted) {
+            const rid = data.round_id;
+            if (rid !== lastRoundId) {
+                lastRoundId = rid;
+                bettingAnimStarted = true;
+                resetGlobe();
+                const lat = data.city_lat || 0;
+                const lng = data.city_lng || 0;
+                const name = data.city_name || data.stream_name || '';
+                const thumb = data.thumbnail || '';
+                if (lat !== 0 || lng !== 0) flyToCity(lat, lng, name, thumb);
+            }
+        }
+
+        // Phase switch: COUNTING/WAITING starts (hide globe, show stream)
+        if ((phase === 'COUNTING' || phase === 'WAITING') && currentPhase === 'BETTING') {
+            currentPhase = phase;
+            showStreamPhase();
+        }
+
+        if (phase === 'COUNTING') currentPhase = 'COUNTING';
+        if (phase === 'WAITING') currentPhase = 'WAITING';
+    }
+
+    // WebSocket — PRIMARY data source (no polling needed)
+    function connectWebSocket() {
+        const ws = new WebSocket('ws://' + location.host + '/ws/game');
+
+        ws.onopen = () => { wsConnected = true; };
+
+        ws.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'initial_state' || msg.type === 'game_state') {
+                    handleGameData(msg.data);
+                }
+                if (msg.type === 'timer_update') {
+                    handleGameData(msg.data);
+                }
+            } catch (err) {}
+        };
+
+        ws.onclose = () => {
+            wsConnected = false;
+            setTimeout(connectWebSocket, 3000);
+        };
+
+        ws.onerror = () => ws.close();
+    }
+
+    // HTTP polling — FALLBACK only (every 2s, not 500ms)
+    async function pollFallback() {
+        if (wsConnected) return; // skip if WebSocket working
+        try {
+            const resp = await fetch('/api/round');
+            const data = await resp.json();
+            handleGameData(data);
+        } catch (e) {}
+    }
+
+    // ══════════════════════════════════════════
+    //  LIVEKIT — connects once, stays forever
+    // ══════════════════════════════════════════
+    async function connectLiveKit() {
+        try {
+            const resp = await fetch('/api/livekit/token?identity=viewer-' + Date.now());
+            const data = await resp.json();
+            if (data.error) { setTimeout(connectLiveKit, 10000); return; }
+
+            const room = new LivekitClient.Room();
+            room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+                if (track.kind === LivekitClient.Track.Kind.Video) {
+                    track.attach(lkVideo);
+                    liveKitConnected = true;
+                    if (currentPhase !== 'BETTING') dot.className = 'status-dot connected';
+                }
+            });
+            room.on(LivekitClient.RoomEvent.Disconnected, () => {
+                liveKitConnected = false;
+                setTimeout(connectLiveKit, 5000);
+            });
+            await room.connect(data.url, data.token);
+        } catch (err) {
+            setTimeout(connectLiveKit, 10000);
+        }
+    }
+
+    // ══════════════════════════════════════════
+    //  STARTUP
+    // ══════════════════════════════════════════
+    initGlobe();
+    startGlobeLoop(); // render globe initially
+    connectLiveKit();
+    connectWebSocket();
+    setInterval(pollFallback, 2000); // slow fallback only
+    pollFallback();
     </script>
 </body>
 </html>

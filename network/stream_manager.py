@@ -66,7 +66,8 @@ class DownloadedClip:
 
     def __init__(self, clip_path: str, stream_name: str,
                  line_config_file: str, imgsz: int, confidence: float,
-                 animation_video: str = "", thumbnail: str = ""):
+                 animation_video: str = "", thumbnail: str = "",
+                 lat: float = 0.0, lng: float = 0.0):
         self.clip_path = clip_path
         self.stream_name = stream_name
         self.line_config_file = line_config_file
@@ -74,6 +75,8 @@ class DownloadedClip:
         self.confidence = confidence
         self.animation_video = animation_video
         self.thumbnail = thumbnail
+        self.lat = lat
+        self.lng = lng
         self.downloaded_at = time.time()
 
 
@@ -83,7 +86,8 @@ class PreProcessedClip:
     def __init__(self, clip_path: str, stream_name: str, result: int,
                  detections: dict, counting_events: list,
                  total_frames: int, clip_fps: float,
-                 animation_video: str = "", thumbnail: str = ""):
+                 animation_video: str = "", thumbnail: str = "",
+                 lat: float = 0.0, lng: float = 0.0):
         self.clip_path = clip_path
         self.stream_name = stream_name
         self.result = result
@@ -93,6 +97,8 @@ class PreProcessedClip:
         self.clip_fps = clip_fps
         self.animation_video = animation_video
         self.thumbnail = thumbnail
+        self.lat = lat
+        self.lng = lng
         self.processed_at = time.time()
 
 
@@ -147,9 +153,9 @@ class SequentialDownloader:
 
     def add_stream(self, name: str, url: str, config_path: str,
                    imgsz: int = 1600, confidence: float = 0.10,
-                   animation_video: str = "", thumbnail: str = ""):
+                   animation_video: str = "", thumbnail: str = "",
+                   lat: float = 0.0, lng: float = 0.0):
         """Add a stream to the round-robin rotation."""
-        # Don't add duplicates
         for s in self.streams:
             if s["name"] == name:
                 return
@@ -157,6 +163,7 @@ class SequentialDownloader:
             "name": name, "url": url, "config": config_path,
             "imgsz": imgsz, "conf": confidence,
             "animation": animation_video, "thumbnail": thumbnail,
+            "lat": lat, "lng": lng,
         })
         self._failures[name] = 0
 
@@ -197,11 +204,9 @@ class SequentialDownloader:
                 'no_playlist': True,
                 'quiet': True,
                 'no_warnings': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['default', 'android', 'web'],
-                        'formats': ['missing_pot'],
-        }
+                'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...',
+        'Accept-Language': 'en-US,en;q=0.9'
     },
 }
 
@@ -278,7 +283,7 @@ class SequentialDownloader:
                 continue
 
             # Try up to 3 times
-            for attempt in range(3):
+            for attempt in range(1):
                 resolved = self._resolve_url_api(name, url)
                 if resolved:
                     break
@@ -360,7 +365,7 @@ class SequentialDownloader:
             "-i", download_url,
             "-t", str(CLIP_DURATION),
 
-            "-vf", "scale=960:-1,fps=18",   # ← force output to 20fps
+            "-vf", "scale=960:-1,fps=18",   # ← force output to 18fps
             "-c:v", "libx264",             # ← re-encode needed for fps change
             "-preset", "ultrafast",          # ← fastest encoding with gpu
             "-crf", "28",
@@ -517,6 +522,8 @@ class SequentialDownloader:
                         confidence=stream["conf"],
                         animation_video=stream.get("animation", ""),
                         thumbnail=stream.get("thumbnail", ""),
+                        lat=stream.get("lat", 0.0),
+                        lng=stream.get("lng", 0.0),
                     )
                     self.download_queue.put(dl_clip)
 
@@ -654,6 +661,8 @@ class YOLOWorker:
                 clip_fps=result["clip_fps"],
                 animation_video=dl_clip.animation_video,
                 thumbnail=dl_clip.thumbnail,
+                lat=dl_clip.lat,
+                lng=dl_clip.lng,
             )
             self.clips_approved += 1
             print(f"[YOLO] {dl_clip.stream_name}: APPROVED (count={count}) | "
@@ -725,14 +734,15 @@ class Pipeline:
     def add_stream(self, stream_name: str, stream_url: str,
                    line_config_file: str, imgsz: int = 1600,
                    confidence: float = 0.10,
-                   animation_video: str = "", thumbnail: str = ""):
+                   animation_video: str = "", thumbnail: str = "",
+                   lat: float = 0.0, lng: float = 0.0):
         """Add a stream to the round-robin download rotation."""
         if stream_name in self.stream_names:
             return
 
         self.downloader.add_stream(stream_name, stream_url,
                                    line_config_file, imgsz, confidence,
-                                   animation_video, thumbnail)
+                                   animation_video, thumbnail, lat, lng)
         self.stream_names.append(stream_name)
 
         print(f"[PIPELINE] Added stream: {stream_name} "

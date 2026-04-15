@@ -296,6 +296,10 @@ def show_betting_phase(rd: RoundData, duration: float,
         under_threshold=rd.under_threshold,
         over_threshold=rd.over_threshold,
         exact_numbers=rd.exact_numbers,
+        thumbnail=getattr(rd.clip, 'thumbnail', '') if rd.clip else '',
+        city_lat=getattr(rd.clip, 'lat', 0.0) if rd.clip else 0.0,
+        city_lng=getattr(rd.clip, 'lng', 0.0) if rd.clip else 0.0,
+        city_name=rd.stream_name,
     )
 
     # ── Determine animation video (city-specific or fallback) ──
@@ -318,25 +322,22 @@ def show_betting_phase(rd: RoundData, duration: float,
                 new_tw, new_th = int(tw * scale), int(th * scale)
                 thumb_img = cv2.resize(raw, (new_tw, new_th))
 
-    # ── Open animation video (slow-motion: stretch to fill 15 sec) ──
+    # ── Open animation video (native FPS, freeze if shorter than 15 sec) ──
     cap = None
     last_video_frame = None
     video_ended = False
-    slow_frame_time = 0.033  # default ~30fps fallback
+    frame_time = 0.033  # default ~30fps
 
     if os.path.exists(video_path):
         cap = cv2.VideoCapture(video_path)
         if cap.isOpened():
             vid_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames > 0 and vid_fps > 0:
-                # Slow-motion: spread all frames evenly across 'duration' seconds
-                slow_frame_time = duration / total_frames
+            frame_time = 1.0 / vid_fps  # native FPS pacing
         else:
             cap = None
 
     start = time.time()
-    next_frame_at = start  # when to read next video frame
+    next_frame_at = start
 
     while True:
         elapsed = time.time() - start
@@ -345,14 +346,14 @@ def show_betting_phase(rd: RoundData, duration: float,
 
         remaining = max(0, duration - elapsed)
 
-        # ── Get frame: video (slow-motion paced) -> frozen -> dark fallback ──
+        # ── Get frame: video at native FPS -> freeze last frame -> dark fallback ──
         frame = None
 
         if cap is not None and not video_ended:
             now = time.time()
             if now >= next_frame_at:
                 ret, vframe = cap.read()
-                next_frame_at = now + slow_frame_time
+                next_frame_at = now + frame_time
                 if not ret:
                     video_ended = True
             else:
@@ -591,7 +592,9 @@ def run_scheduler(config_path: str, model_name: str, imgsz: int,
                 cfg_path = stream_config_path(name)
                 pipeline.add_stream(name, url, cfg_path, imgsz=imgsz,
                                     animation_video=s.get("animation", ""),
-                                    thumbnail=s.get("thumbnail", ""))
+                                    thumbnail=s.get("thumbnail", ""),
+                                    lat=s.get("lat", 0.0),
+                                    lng=s.get("lng", 0.0))
 
     # ── Cold start: add all streams from current slot ──
     active_slot = get_active_slot(slots)

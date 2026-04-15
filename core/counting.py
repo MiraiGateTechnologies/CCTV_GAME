@@ -517,8 +517,7 @@ def render_debug_frame(frame, counter, results, counting_active,
     }
 
     # ── Build dots — use YOLO results directly with conf >= 0.20 filter ──
-    # Same filter as process_detections() dot logic — no random false positive dots.
-    # Identical to what gets stored for playback.
+    # ── Draw YOLO bounding boxes (debug only — invisible in playback) ──
     MIN_DOT_CONF = 0.20
     dots = []
     if results is not None and results[0].boxes is not None and results[0].boxes.id is not None:
@@ -530,12 +529,18 @@ def render_debug_frame(frame, counter, results, counting_active,
         for r_box, r_tid, r_conf, r_cls in zip(r_boxes, r_tids, r_confs, r_classes):
             if r_cls not in _vc:
                 continue
-            if r_tid in counter.interval_counted_ids:
-                continue
-            if r_conf < MIN_DOT_CONF:
-                continue
             rx1, ry1, rx2, ry2 = r_box.astype(int)
-            dots.append(((rx1+rx2)//2, (ry1+ry2)//2))
+ 
+            # Bbox color: green if counted, light blue if tracked
+            if r_tid in counter.interval_counted_ids:
+                box_color = (0, 180, 0)       # green = counted
+            else:
+                box_color = (180, 160, 50)    # light blue = tracking
+            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), box_color, 1, cv2.LINE_AA)
+ 
+            # Dot for uncounted + confident vehicles only
+            if r_tid not in counter.interval_counted_ids and r_conf >= MIN_DOT_CONF:
+                dots.append(((rx1+rx2)//2, (ry1+ry2)//2))
 
     # ── Build brackets list from counter flash state ──
     brackets = []

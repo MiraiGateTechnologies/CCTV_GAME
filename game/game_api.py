@@ -146,6 +146,11 @@ _state = {
     # Counting
     "vehicle_count": 0,
 
+    # City coordinates (for 3D globe animation during BETTING)
+    "city_lat": 0.0,
+    "city_lng": 0.0,
+    "city_name": "",
+
     # Boundaries (odds numbers — change every round)
     "boundaries": {},
 
@@ -185,7 +190,10 @@ def update_phase(phase: str, round_id: int = None, stream_name: str = None,
                  under_threshold: int = None, over_threshold: int = None,
                  exact_numbers: list = None, vehicle_count: int = None,
                  server_seed: str = None, result: int = None,
-                 bet_outcomes: dict = None):
+                 bet_outcomes: dict = None,
+                 thumbnail: str = None,
+                 city_lat: float = None, city_lng: float = None,
+                 city_name: str = None):
     """
     Called by scheduler at each phase transition.
     This is the ONLY way game state gets updated.
@@ -221,6 +229,14 @@ def update_phase(phase: str, round_id: int = None, stream_name: str = None,
             _state["result"] = result
         if bet_outcomes is not None:
             _state["bet_outcomes"] = bet_outcomes
+        if city_lat is not None:
+            _state["city_lat"] = city_lat
+        if city_lng is not None:
+            _state["city_lng"] = city_lng
+        if city_name is not None:
+            _state["city_name"] = city_name
+        if thumbnail is not None:
+            _state["thumbnail"] = thumbnail
 
         # Phase-specific resets
         if phase == "BETTING":
@@ -343,6 +359,13 @@ def get_api_response() -> dict:
             
             "phase": phase,
             "commitment_hash": _state["commitment_hash"],
+
+            # City coordinates (for 3D globe animation during BETTING)
+            "city_lat": _state["city_lat"] if phase == "BETTING" else None,
+            "city_lng": _state["city_lng"] if phase == "BETTING" else None,
+            "city_name": _state["city_name"] if phase == "BETTING" else None,
+            "stream_name": _state["stream_name"],
+            "thumbnail": _state.get("thumbnail", ""),
 
             # Extra fields (revealed during WAITING only)
             "server_seed": _state["server_seed"] if phase == "WAITING" else None,

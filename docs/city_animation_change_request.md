@@ -1,4 +1,4 @@
-# Change Request: City-Specific Animation Video for Betting Phase
+.# Change Request: City-Specific Animation Video for Betting Phase
 
 ## Overview
 
@@ -22,7 +22,7 @@ BETTING PHASE (15 sec):
              Video CONTINUES playing behind the thumbnail
   10-15 sec: Video ends → freeze last frame, thumbnail stays
   0-15 sec:  Yellow circular timer (top-right, unchanged)
-  
+
   Example:
     Round plays "Tokyo Shinjuku" stream
     → animation_videos/tokyo_animation.mp4 plays fullscreen
@@ -31,15 +31,15 @@ BETTING PHASE (15 sec):
     → Video continues behind thumbnail until ends
     → After video ends: frozen frame + thumbnail stays
     → Timer counts 15→0
-    
+
     Round plays "San Marcos-Texas, US" stream
     → animation_videos/sanmarcos_animation.mp4 plays
     → At 3 sec: thumbnail (thumbnails/sanmarcos.jpg) + "San Marcos-Texas, US"
     → Timer counts 15→0
-    
+
     NO animation video for a city?
     → Fallback: Earth Zoom video (existing behavior)
-    
+
     NO thumbnail photo?
     → Show stream name text only (no image, just text in center)
 ```
@@ -78,7 +78,7 @@ D:\cctv_main\CCTV_GAME\
 └── streams_config.json            ← ADD animation + thumbnail fields
 ```
 
-## streams_config.json — Add `animation` + `thumbnail` Fields
+## streams_config.json — Add `animation` Field
 
 ```json
 {
@@ -90,32 +90,27 @@ D:\cctv_main\CCTV_GAME\
         {
           "name": "Tokyo Shinjuku",
           "url": "https://www.youtube.com/live/...",
-          "animation": "tokyo_animation.mp4",
-          "thumbnail": "tokyo.jpg"
+          "animation": "tokyo_animation.mp4"
         },
         {
           "name": "Tokyo Shinjuku Kabukicho",
           "url": "https://www.youtube.com/live/...",
-          "animation": "tokyo_animation.mp4",
-          "thumbnail": "tokyo.jpg"
+          "animation": "tokyo_animation.mp4"
         },
         {
           "name": "Russia Petersburg",
           "url": "https://www.youtube.com/live/...",
-          "animation": "russia_animation.mp4",
-          "thumbnail": "russia.jpg"
+          "animation": "russia_animation.mp4"
         },
         {
           "name": "San Marcos-Texas, US",
           "url": "https://www.youtube.com/live/...",
-          "animation": "sanmarcos_animation.mp4",
-          "thumbnail": "sanmarcos.jpg"
+          "animation": "sanmarcos_animation.mp4"
         },
         {
           "name": "El Gaucho - Bangkok, Thailand",
           "url": "https://www.youtube.com/live/...",
-          "animation": "bangkok_animation.mp4",
-          "thumbnail": "bangkok.jpg"
+          "animation": "bangkok_animation.mp4"
         }
       ]
     }
@@ -124,11 +119,10 @@ D:\cctv_main\CCTV_GAME\
 ```
 
 **Rules:**
-- Same city ke multiple streams → same animation + thumbnail (e.g., 3 Tokyo streams → tokyo_animation.mp4 + tokyo.jpg)
+
+- Same city ke multiple streams → same animation file (e.g., 3 Tokyo streams → tokyo_animation.mp4)
 - `animation` field optional — missing = fallback to Earth Zoom
-- `thumbnail` field optional — missing = show stream name text only (no image)
-- animation path relative to `animation_videos/` folder
-- thumbnail path relative to `thumbnails/` folder
+- File path relative to `animation_videos/` folder
 
 ## City-to-Animation Mapping (from current streams_config.json)
 
@@ -198,7 +192,7 @@ NO CHANGE: game/game_api.py (game state unchanged)
 ### 1. streams_config.json — Add animation field
 
 ```json
-{"name": "Tokyo Shinjuku", "url": "...", "animation": "tokyo_animation.mp4"}
+{ "name": "Tokyo Shinjuku", "url": "...", "animation": "tokyo_animation.mp4" }
 ```
 
 ### 2. PreProcessedClip — Add field
@@ -246,10 +240,10 @@ def show_betting_phase(rd, duration, pipeline=None):
     # Determine which video to play
     anim_file = rd.clip.animation_video  # e.g., "tokyo_animation.mp4"
     video_path = os.path.join(ANIMATION_DIR, anim_file) if anim_file else ""
-    
+
     if not video_path or not os.path.exists(video_path):
         video_path = FALLBACK_VIDEO  # Earth Zoom fallback
-    
+
     # Rest of function same — open video, play, show stream name, timer
     cap = cv2.VideoCapture(video_path)
     ...
@@ -265,78 +259,34 @@ class RoundData:
     # Passed from PreProcessedClip → used by show_betting_phase()
 ```
 
-## Visual Timeline (15 sec betting phase)
+## Stream Name Display
 
 ```
-TIME    WHAT'S SHOWN
-----    ----------------------------------------
-0-3s    City animation video plays FULLSCREEN
-        Only yellow circular timer at top-right
-        NO thumbnail, NO text
+AFTER video ends (frozen frame):
 
-3s      Thumbnail photo + stream name APPEARS in CENTER
-        Animation video CONTINUES playing behind it
-        Semi-transparent dark backdrop behind thumbnail
-
-3-10s   Animation video plays + thumbnail + stream name on top
-        Timer counting down (top-right)
-
-10-15s  Video ended -> frozen last frame
-        Thumbnail + stream name STAYS visible
-        Timer continues counting (top-right)
-```
-
-## Thumbnail + Stream Name Layout (appears at 3 sec)
-
-```
-  +--------------------------------------------------------+
-  |                                                    [O] | <- yellow timer
-  |        (animation video playing behind)                |
-  |                                                        |
-  |               +----------------------+                 |
-  |               |                      |                 |
-  |               |    +----------+      |                 |
-  |               |    | THUMBNAIL|      |  <- city photo  |
-  |               |    |  (image) |      |    200x120px    |
-  |               |    +----------+      |                 |
-  |               |                      |                 |
-  |               |   Tokyo Shinjuku     |  <- stream name |
-  |               |   NEXT STREAM        |  <- subtitle    |
-  |               |                      |                 |
-  |               +----------------------+                 |
-  |         (semi-transparent dark backdrop)               |
-  +--------------------------------------------------------+
-
-NO thumbnail photo available? -> text only:
-
-  +--------------------------------------------------------+
-  |                                                    [O] |
-  |        (animation video playing behind)                |
-  |                                                        |
-  |               +----------------------+                 |
-  |               |                      |                 |
-  |               |   Tokyo Shinjuku     |  <- stream name |
-  |               |   NEXT STREAM        |  <- subtitle    |
-  |               |                      |                 |
-  |               +----------------------+                 |
-  |                                                        |
-  +--------------------------------------------------------+
+  ┌────────────────────────────────────────────────────────┐
+  │                                                    [O] │ ← yellow timer
+  │                                                        │
+  │                                                        │
+  │               ┌──────────────────────┐                 │
+  │               │                      │                 │
+  │               │   Tokyo Shinjuku     │  ← stream name  │
+  │               │   NEXT STREAM        │  ← subtitle     │
+  │               │                      │                 │
+  │               └──────────────────────┘                 │
+  │                                                        │
+  └────────────────────────────────────────────────────────┘
 ```
 
 ## Edge Cases
 
 ```
-1. Animation file missing       -> fallback to Earth Zoom
-2. Animation field not in config -> fallback to Earth Zoom
-3. Thumbnail file missing       -> show stream name text only (no image)
-4. Thumbnail field not in config -> show stream name text only (no image)
-5. Video shorter than 3 sec     -> thumbnail appears when video ends (not at 3s)
-6. Video shorter than 15 sec    -> freeze last frame (existing behavior)
-7. Video longer than 15 sec     -> stops at 15 sec (existing behavior)
-8. Same animation for multiple  -> plays same video, different stream name + thumbnail
-9. New stream without animation -> Earth Zoom + text only
-10. Thumbnail image very large  -> resize to max 200x120px, maintain aspect ratio
-11. Thumbnail image very small  -> upscale to min 150x90px
+1. Animation file missing → fallback to Earth Zoom ✅
+2. Animation field not in config → fallback to Earth Zoom ✅
+3. Animation video shorter than 15 sec → freeze last frame (existing behavior) ✅
+4. Animation video longer than 15 sec → stops at 15 sec (existing behavior) ✅
+5. Same animation for multiple streams → plays same video, different stream name ✅
+6. New stream added without animation → Earth Zoom plays ✅
 ```
 
 ## Estimated Effort

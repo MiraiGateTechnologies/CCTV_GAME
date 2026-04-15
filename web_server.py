@@ -29,6 +29,7 @@ from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 # ── FastAPI App ───────────────────────────────────────────────
@@ -37,6 +38,14 @@ app = FastAPI(
     description="Real-time vehicle counting game — stream + game data",
     version="1.0.0",
 )
+
+# Serve static files (NASA texture, thumbnails, etc.)
+_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_thumbnails_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumbnails")
+if os.path.exists(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+if os.path.exists(_thumbnails_dir):
+    app.mount("/thumbnails", StaticFiles(directory=_thumbnails_dir), name="thumbnails")
 
 # ── Frame buffer (thread-safe) ────────────────────────────────
 _output_frame = None
