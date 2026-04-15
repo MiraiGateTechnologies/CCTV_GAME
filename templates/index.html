@@ -110,7 +110,7 @@
     // ══════════════════════════════════════════
     //  CONFIG — adjustable timings
     // ══════════════════════════════════════════
-    const PIN_DROP_SEC = 9;            // When pin drops on globe
+    const PIN_DROP_SEC = 8;            // Pin drops when animation completes (~8s)
     const THUMBNAIL_REVEAL_SEC = 11;   // When to show thumbnail
     const BETTING_DURATION = 15;       // Total betting phase duration
 
@@ -231,8 +231,7 @@
     }
 
     // ── Compute camera spherical angles to look directly at a lat/lng point ──
-    // Camera must be on the OPPOSITE side of the globe from the target point.
-    // Derived from: camera_pos = -point_pos * distance (so camera looks toward origin → sees point)
+    // Camera on SAME side as pin (looking toward origin → pin on near surface, visible)
     function targetAnglesForLatLng(lat, lng) {
         const phi = (90 - lat) * (Math.PI / 180);
         const theta = (lng + 180) * (Math.PI / 180);
@@ -240,36 +239,34 @@
         const px = -(Math.sin(phi) * Math.cos(theta));
         const py =  Math.cos(phi);
         const pz =  Math.sin(phi) * Math.sin(theta);
-        // Camera at -P (opposite side)
-        const cx = -px, cy = -py, cz = -pz;
-        // Convert to spherical: cy = cos(polar), cx = sin(polar)*sin(az), cz = sin(polar)*cos(az)
-        const polar = Math.acos(Math.max(-1, Math.min(1, cy)));
+        // Camera at +P direction (same side as pin)
+        const polar = Math.acos(Math.max(-1, Math.min(1, py)));
         const sinPolar = Math.sin(polar);
-        const azimuth = (Math.abs(sinPolar) < 1e-10) ? 0 : Math.atan2(cx / sinPolar, cz / sinPolar);
+        const azimuth = (Math.abs(sinPolar) < 1e-10) ? 0 : Math.atan2(px / sinPolar, pz / sinPolar);
         return { polar, azimuth };
     }
 
     // ── Create pin + pulsing ring at lat/lng (in earth-local space) ──
+    // Sizes matched with globe_test.html
     function createPin(lat, lng) {
-        const pos = latLngToVector3(lat, lng, 1.01);
+        const pos = latLngToVector3(lat, lng, 1.02);
         const pin = new THREE.Mesh(
-            new THREE.SphereGeometry(0.025, 16, 16),
+            new THREE.SphereGeometry(0.008, 16, 16),
             new THREE.MeshBasicMaterial({ color: 0xff3344 })
         );
         pin.position.copy(pos);
         pinGroup.add(pin);
 
         const ring = new THREE.Mesh(
-            new THREE.RingGeometry(0.04, 0.06, 32),
-            new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+            new THREE.RingGeometry(0.012, 0.02, 32),
+            new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.7, side: THREE.DoubleSide })
         );
         ring.position.copy(pos);
-        ring.lookAt(new THREE.Vector3(0, 0, 0));  // face outward from earth center
+        ring.lookAt(0, 0, 0);
         pinGroup.add(ring);
 
-        // Pulsing animation
         (function pulse() {
-            new TWEEN.Tween(ring.scale).to({ x: 1.8, y: 1.8, z: 1.8 }, 700)
+            new TWEEN.Tween(ring.scale).to({ x: 2, y: 2, z: 2 }, 700)
                 .easing(TWEEN.Easing.Cubic.Out)
                 .chain(new TWEEN.Tween(ring.scale).to({ x: 1, y: 1, z: 1 }, 700)
                     .easing(TWEEN.Easing.Cubic.In).onComplete(pulse))
@@ -278,17 +275,14 @@
     }
 
     // ══════════════════════════════════════════
-    //  ANIMATION: flyToCity (normal round start)
+    //  ANIMATION: flyToCity — single smooth motion
+    //  Camera starts 60° anti-clockwise offset from target,
+    //  sweeps anti-clockwise + zooms in + tilts to latitude
+    //  in one continuous 8s TWEEN. Pin drops at end.
+    //  Then thumbnail at THUMBNAIL_REVEAL_SEC via setTimeout.
     //
-    //  Timeline (15 sec BETTING):
-    //    0-3s:  Anti-clockwise idle spin (earth rotates, camera far)
-    //    3-8s:  Camera orbits to city + zooms in close
-    //    9s:    Pin drops on exact lat/lng
-    //    11s:   Thumbnail video/image appears
-    //    15s:   BETTING ends → stream shows
-    //
-    //  Approach: Earth stays FIXED (rotation.y = 0). Camera ORBITS around it.
-    //  Pin is child of earth → always at correct lat/lng regardless of view.
+    //  Earth stays FIXED (rotation = 0). Camera ORBITS.
+    //  Pin is child of earth → exact lat/lng always.
     // ══════════════════════════════════════════
 
     function flyToCity(lat, lng, cityName, thumbnail) {
@@ -306,39 +300,32 @@
         // Earth stays at rotation 0 — camera moves instead
         earth.rotation.set(0, 0, 0);
 
-        // Target camera angles to face the city
         const target = targetAnglesForLatLng(lat, lng);
         const startDist = 3.5;
-        const endDist = 1.8;    // close zoom
+        const endDist = 1.5;
 
-        // Animation state object (TWEEN interpolates this)
-        const camState = { dist: startDist, polar: Math.PI / 2, azimuth: 0 };
+        // Start azimuth: 60° anti-clockwise offset from target
+        const startAzimuth = target.azimuth + Math.PI / 3;
+        const s = { dist: startDist, polar: Math.PI / 2, azimuth: startAzimuth };
 
-        // Phase 1 (0-3s): Anti-clockwise idle spin
-        new TWEEN.Tween(camState)
-            .to({ azimuth: -Math.PI / 3 }, 3000)
-            .easing(TWEEN.Easing.Linear.None)
-            .onUpdate(() => setCameraSpherical(camState.dist, camState.polar, camState.azimuth))
-            .start();
+        // Set initial camera position
+        setCameraSpherical(s.dist, s.polar, s.azimuth);
 
-        // Phase 2 (3-8s): Orbit to city + zoom in
-        new TWEEN.Tween(camState)
-            .to({ dist: endDist, polar: target.polar, azimuth: target.azimuth }, 5000)
-            .delay(3000)
+        // Single TWEEN: spin + tilt + zoom → 8 seconds
+        new TWEEN.Tween(s)
+            .to({ dist: endDist, polar: target.polar, azimuth: target.azimuth }, 8000)
             .easing(TWEEN.Easing.Cubic.InOut)
-            .onUpdate(() => setCameraSpherical(camState.dist, camState.polar, camState.azimuth))
+            .onUpdate(() => setCameraSpherical(s.dist, s.polar, s.azimuth))
+            .onComplete(() => {
+                // Pin drop + stream name at animation end (~8s)
+                createPin(lat, lng);
+                showStreamName(cityName);
+            })
             .start();
 
-        // Phase 3 (9s): Pin drop + show stream name
-        const t1 = setTimeout(() => {
-            createPin(lat, lng);
-            showStreamName(cityName);
-        }, PIN_DROP_SEC * 1000);
-        bettingTimeouts.push(t1);
-
-        // Phase 4 (11s): Thumbnail below pin
-        const t2 = setTimeout(() => showThumbnail(cityName, thumbnail), THUMBNAIL_REVEAL_SEC * 1000);
-        bettingTimeouts.push(t2);
+        // Thumbnail at THUMBNAIL_REVEAL_SEC (11s)
+        const t = setTimeout(() => showThumbnail(cityName, thumbnail), THUMBNAIL_REVEAL_SEC * 1000);
+        bettingTimeouts.push(t);
     }
 
     // ── Instant snap for reload catch-up ──
@@ -353,9 +340,9 @@
         currentPinLng = lng;
         earth.rotation.set(0, 0, 0);
 
-        // Snap camera to final position (facing city, zoomed in)
+        // Snap camera to final position (facing city, zoomed in — same endDist as flyToCity)
         const target = targetAnglesForLatLng(lat, lng);
-        setCameraSpherical(1.8, target.polar, target.azimuth);
+        setCameraSpherical(1.5, target.polar, target.azimuth);
 
         // Pin + stream name: show if past PIN_DROP_SEC, else schedule
         if (phaseElapsed >= PIN_DROP_SEC) {
@@ -386,7 +373,7 @@
 
     // ── Project a lat/lng pin position to screen (x, y) pixels ──
     function projectPinToScreen(lat, lng) {
-        const pos = latLngToVector3(lat, lng, 1.01);
+        const pos = latLngToVector3(lat, lng, 1.02);
         // Pin is in earth-local space; earth.rotation is (0,0,0) so world = local
         const worldPos = pos.clone();
         earth.localToWorld(worldPos);

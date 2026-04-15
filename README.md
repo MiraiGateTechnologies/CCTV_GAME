@@ -18,7 +18,7 @@ BETTING (15s) --> COUNTING (35s) --> WAITING (6s) --> next round
 
 **1. BETTING PHASE (15 seconds)**
 
-- A city-themed animation plays with the upcoming stream's name and thumbnail
+- A 3D globe animation (Three.js) flies to the upcoming stream's city, drops a pin at exact lat/lng, then shows a thumbnail video/image connected by a blinking red line
 - The provably fair commitment hash is published
 - Players choose one of four bet types:
 
@@ -71,7 +71,7 @@ The result is a physical measurement (real vehicles on real cameras) — not der
 - Hundreds of live public CCTV feeds worldwide (YouTube Live, HLS, RTSP)
 - Streams are organized by IST time slots (e.g., 08:00-12:00, 12:00-16:00)
 - Each slot contains multiple streams that rotate round-robin
-- Each stream has a city-specific animation video and thumbnail for the betting phase
+- Each stream has lat/lng coordinates and a thumbnail (video/image) for the 3D globe animation during betting
 - 24/7 non-stop operation with automatic stream rotation
 
 ---
@@ -95,7 +95,7 @@ YOLOWorker (1 thread, OWNS GPU exclusively)
          |
 Scheduler (main thread, 56-sec round cycle)
   Cold start: waits for 5 clips
-  |-- BETTING  (15s)  City animation + thumbnail at 3s + yellow timer
+  |-- BETTING  (15s)  3D globe animation (Three.js) + pin + thumbnail
   |-- COUNTING (35s)  Clip plays, AI overlay, odds bar top-middle
   |-- WAITING  (6s)   Stream continues, count frozen, result revealed
          |
@@ -147,12 +147,13 @@ PREPARE:
     -> Package into immutable RoundData
 
 BETTING (15 sec):
-  0-3s:   City animation video plays fullscreen (slow-motion stretched to 15s)
-  3s:     Thumbnail photo + stream name appears CENTER
-  3-10s:  Animation continues behind thumbnail overlay
-  10-15s: Frozen frame + thumbnail stays
-  0-15s:  Yellow circular timer top-right (consistent with counting/waiting)
-  Data:   Commitment hash published, boundaries available
+  Browser: 3D globe animation (Three.js + TWEEN.js)
+  0-8s:   Camera orbits anti-clockwise + zooms into city lat/lng
+  8s:     Red pin drops on exact city coordinates + stream name top-center
+  11s:    Thumbnail (video/image) appears below pin, connected by blinking red line
+  0-15s:  Yellow circular timer top-right
+  Server: Dark frame pushed to LiveKit (keeps connection alive)
+  Data:   Commitment hash published, boundaries available via WebSocket
 
 COUNTING (35 sec):
   Pre-recorded clip plays with detection overlay
@@ -182,16 +183,19 @@ FINALIZE:
 
 ```
 push_frame(frame) sends to BOTH:
-  web_server.update_frame() -> MJPEG /video_feed
+  web_server.update_frame() -> MJPEG buffer (currently disabled)
   livekit_publisher.update_frame() -> LiveKit WebRTC room
 
 game_api.update_phase() -> WebSocket broadcast to all clients
 game_api.update_count() -> WebSocket count_update on change
 
 Browser:
-  Primary: LiveKit WebRTC (green dot)
-  Fallback: MJPEG stream (yellow dot)
-  Auto-retry LiveKit every 10 sec
+  BETTING:  Three.js 3D globe (browser-rendered, no server frames needed)
+            Server pushes dark frames to keep LiveKit alive
+  COUNTING: LiveKit WebRTC stream (green dot)
+  WAITING:  LiveKit WebRTC stream continues
+  WebSocket: Primary data source (game state, timers, city coordinates)
+  HTTP poll: Fallback every 2s if WebSocket disconnects
 ```
 
 ---
@@ -370,28 +374,41 @@ offline_count():
 
 ---
 
-## Betting Phase (15 sec) — City Animation
+## Betting Phase (15 sec) — 3D Globe Animation
 
-Each stream has a city-specific animation video and thumbnail:
+During BETTING, the browser renders a real-time 3D globe (Three.js + TWEEN.js) that flies to the next stream's city. The server pushes dark frames to keep LiveKit alive while the browser handles all visuals.
+
+Each stream has a city-specific thumbnail and lat/lng coordinates:
 
 ```json
 {
   "name": "Tokyo Shinjuku",
   "url": "https://www.youtube.com/live/...",
-  "animation": "tokyo_animation.mp4",
-  "thumbnail": "tokyo.jpg"
+  "thumbnail": "Shinjuku.mp4",
+  "lat": 35.6938,
+  "lng": 139.7034
 }
 ```
 
-**Timeline:**
-- 0-3s: City animation plays fullscreen (slow-motion to fill 15s)
-- 3s: Thumbnail photo + stream name appears center
-- 3-15s: Animation continues behind thumbnail
-- Fallback: Earth Zoom video if no city animation
+**Animation Timeline (browser-side, `templates/index.html`):**
+- 0-8s: Camera orbits anti-clockwise around a NASA night-lights globe, simultaneously zooming in and tilting to the city's latitude/longitude
+- 8s: Red pin drops on exact lat/lng coordinates (pin is child of earth mesh, guaranteed accuracy). Stream name appears at top-center.
+- 11s: Thumbnail video/image appears below pin, connected by a thin blinking red line
+- 15s: BETTING ends, globe hides (`visibility: hidden`), LiveKit stream takes over
+
+**How it works:**
+- Globe uses `SphereGeometry` with equirectangular NASA texture (`static/earth_night.jpg`)
+- Pin position computed via `latLngToVector3()` matching Three.js UV mapping
+- Camera position computed via spherical coordinates (`setCameraSpherical()`) — earth never rotates, camera orbits
+- `targetAnglesForLatLng()` places camera on the same side as the pin, looking toward origin
+- Pin group is a child of the earth mesh, so pin stays locked to the surface regardless of camera angle
+- Coordinates should be taken from Google Maps (right-click → copy coordinates)
 
 **Folders:**
-- `animation_videos/` — city animation MP4 files
-- `thumbnails/` — city photo JPG files
+- `thumbnails/` — city thumbnail videos (.mp4) or images (.jpg/.png)
+- `static/` — earth_night.jpg (NASA night-lights texture, 13500x6750 equirectangular)
+
+**Test page:** `http://localhost:5000/globe-test` — standalone globe test with custom lat/lng input, no backend needed
 
 ---
 

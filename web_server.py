@@ -174,6 +174,14 @@ def index():
         return f.read()
 
 
+@app.get("/globe-test", response_class=HTMLResponse)
+def globe_test():
+    """Standalone globe animation test — no backend needed."""
+    html_path = os.path.join(os.path.dirname(__file__), "templates", "globe_test.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 # @app.get("/video_feed")
 # def video_feed():
 #     """MJPEG live video stream — <img src='/video_feed'> in browser."""
